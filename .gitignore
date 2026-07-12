@@ -1,0 +1,103 @@
+
+# `.gitignore`
+
+```gitignore
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+*.pyd
+*.dll
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Conda environment files that are generated locally
+.conda/
+conda-meta/
+
+# VS Code
+.vscode/*
+!.vscode/settings.example.json
+!.vscode/launch.example.json
+
+# PyCharm
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Test/cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local data captures
+captures/
+sessions/
+exports/
+*.la
+*.laz
+*.sr
+*.vcd
+*.csv
+
+# Keep sample/demo data if explicitly placed here
+!examples/
+!examples/**
+!test_data/
+!test_data/**
+
+# Large binary/raw sample files
+*.bin
+*.raw
+*.npy
+*.npz
+
+# Arduino build/cache artifacts
+*.hex
+*.elf
+*.eep
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp
+
+# Environment variables/secrets
+.env
+.env.*
+!.env.example
+
+# Windows shortcut/cache
+*.lnk
+
+# Generated documentation
+site/
