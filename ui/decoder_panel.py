@@ -19,6 +19,7 @@ from PyQt6.QtGui import QColor, QBrush
 from data.logic_sample_buffer import LogicSampleBuffer
 from decoder.decode_annotation import DecodeAnnotation
 from decoder.spi_decoder import SPIDecoder, SPIConfig
+from decoder.i2c_decoder import I2CDecoder, I2CConfig
 from config.app_config import CHANNEL_NAMES
 
 
@@ -165,21 +166,32 @@ class DecoderPanel(QWidget):
             annotations = decoder.decode(self.buffer, config)
 
         elif decoder_name == "I2C":
-            sda_ch = self.i2c_sda_combo.currentText()
-            scl_ch = self.i2c_scl_combo.currentText()
+            decoder = I2CDecoder()
 
-            annotations = [
-                DecodeAnnotation(
-                    start_sample=0,
-                    end_sample=0,
-                    protocol="I2C",
-                    type="TODO",
-                    value="",
-                    text=f"I2C decoder will use SDA={sda_ch}, SCL={scl_ch}. Implementation in next milestone.",
-                    error=True,
-                    error_reason="Not implemented",
-                )
-            ]
+            config = I2CConfig(
+                sda_channel=self.i2c_sda_combo.currentIndex(),
+                scl_channel=self.i2c_scl_combo.currentIndex(),
+            )
+
+            annotations = decoder.decode(
+                self.buffer,
+                config,
+            )
+
+            # Không để bảng trống khiến người dùng tưởng nút Decode hỏng.
+            if not annotations:
+                annotations = [
+                    DecodeAnnotation(
+                        start_sample=0,
+                        end_sample=0,
+                        protocol="I2C",
+                        type="WARNING",
+                        value="",
+                        text=("No I2C frame found. " "Check SDA/SCL mapping and capture data."),
+                        error=True,
+                        error_reason="No START condition detected",
+                    )
+                ]
 
         elif decoder_name == "UART":
             rx_ch = self.uart_rx_combo.currentText()
