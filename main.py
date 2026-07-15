@@ -17,14 +17,15 @@ from PyQt6.QtCore import Qt
 
 from driver.demo_driver import DemoDriver
 from ui.waveform_view import WaveformView
+from ui.decoder_panel import DecoderPanel
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("Logic Analyzer App - Milestone 2 Waveform")
-        self.resize(1200, 750)
+        self.setWindowTitle("Logic Analyzer App - Milestone 3 Decoder Framework")
+        self.resize(1250, 800)
 
         self.current_buffer = None
 
@@ -44,17 +45,25 @@ class MainWindow(QMainWindow):
 
         root_layout.addLayout(top_bar)
 
-        # Main splitter: waveform trên, text log dưới
+        # Main splitter
         splitter = QSplitter(Qt.Orientation.Vertical)
 
         self.waveform_view = WaveformView()
+
+        bottom_splitter = QSplitter(Qt.Orientation.Horizontal)
+
         self.output = QTextEdit()
         self.output.setReadOnly(True)
-        self.output.setMaximumHeight(180)
+
+        self.decoder_panel = DecoderPanel()
+
+        bottom_splitter.addWidget(self.output)
+        bottom_splitter.addWidget(self.decoder_panel)
+        bottom_splitter.setSizes([420, 780])
 
         splitter.addWidget(self.waveform_view)
-        splitter.addWidget(self.output)
-        splitter.setSizes([550, 160])
+        splitter.addWidget(bottom_splitter)
+        splitter.setSizes([560, 220])
 
         root_layout.addWidget(splitter)
 
@@ -69,6 +78,7 @@ class MainWindow(QMainWindow):
 
         self.current_buffer = buffer
         self.waveform_view.set_buffer(buffer)
+        self.decoder_panel.set_buffer(buffer)
 
         lines = []
         lines.append("Demo capture generated successfully.")
@@ -95,6 +105,11 @@ class MainWindow(QMainWindow):
         lines.append("- Mouse wheel: zoom in/out")
         lines.append("- Drag left mouse: pan horizontally")
         lines.append("- Fit View: show whole capture")
+        lines.append("")
+        lines.append("Decoder:")
+        lines.append("- Select SPI and click Decode.")
+        lines.append("- Expected SPI MOSI: 0x55, 0xAA, 0x3C, 0xC3")
+        lines.append("- Expected SPI MISO: 0x11, 0x22, 0x33, 0x44")
 
         self.output.setPlainText("\n".join(lines))
 
