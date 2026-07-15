@@ -20,6 +20,7 @@ from data.logic_sample_buffer import LogicSampleBuffer
 from decoder.decode_annotation import DecodeAnnotation
 from decoder.spi_decoder import SPIDecoder, SPIConfig
 from decoder.i2c_decoder import I2CDecoder, I2CConfig
+from decoder.uart_decoder import UARTDecoder, UARTConfig
 from config.app_config import CHANNEL_NAMES
 
 
@@ -88,6 +89,61 @@ class DecoderPanel(QWidget):
 
         # UART combo box, dùng cho milestone sau
         self.uart_rx_combo = self._make_channel_combo(default_index=6)  # CH7
+        self.uart_baud_combo = QComboBox()
+        self.uart_baud_combo.addItems(
+            [
+                "1200",
+                "2400",
+                "4800",
+                "9600",
+                "19200",
+                "38400",
+                "57600",
+                "115200",
+            ]
+        )
+        self.uart_baud_combo.setCurrentText("9600")
+
+        self.uart_data_bits_combo = QComboBox()
+        self.uart_data_bits_combo.addItems(
+            [
+                "5",
+                "6",
+                "7",
+                "8",
+            ]
+        )
+        self.uart_data_bits_combo.setCurrentText("8")
+
+        self.uart_parity_combo = QComboBox()
+        self.uart_parity_combo.addItems(
+            [
+                "None",
+                "Even",
+                "Odd",
+            ]
+        )
+        self.uart_parity_combo.setCurrentText("None")
+
+        self.uart_stop_bits_combo = QComboBox()
+        self.uart_stop_bits_combo.addItems(
+            [
+                "1",
+                "2",
+            ]
+        )
+        self.uart_stop_bits_combo.setCurrentText("1")
+        config_layout.addWidget(QLabel("UART Baud:"), 2, 0)
+        config_layout.addWidget(self.uart_baud_combo, 2, 1)
+
+        config_layout.addWidget(QLabel("Data bits:"), 2, 2)
+        config_layout.addWidget(self.uart_data_bits_combo, 2, 3)
+
+        config_layout.addWidget(QLabel("Parity:"), 2, 4)
+        config_layout.addWidget(self.uart_parity_combo, 2, 5)
+
+        config_layout.addWidget(QLabel("Stop bits:"), 2, 6)
+        config_layout.addWidget(self.uart_stop_bits_combo, 2, 7)
 
         config_layout.addWidget(QLabel("UART RX:"), 1, 4)
         config_layout.addWidget(self.uart_rx_combo, 1, 5)
@@ -194,24 +250,39 @@ class DecoderPanel(QWidget):
                 ]
 
         elif decoder_name == "UART":
-            rx_ch = self.uart_rx_combo.currentText()
+            decoder = UARTDecoder()
 
-            annotations = [
-                DecodeAnnotation(
-                    start_sample=0,
-                    end_sample=0,
-                    protocol="UART",
-                    type="TODO",
-                    value="",
-                    text=f"UART decoder will use RX={rx_ch}. Implementation after I2C.",
-                    error=True,
-                    error_reason="Not implemented",
-                )
-            ]
+            config = UARTConfig(
+                rx_channel=self.uart_rx_combo.currentIndex(),
+                baudrate=int(self.uart_baud_combo.currentText()),
+                data_bits=int(self.uart_data_bits_combo.currentText()),
+                parity=self.uart_parity_combo.currentText().upper(),
+                stop_bits=int(self.uart_stop_bits_combo.currentText()),
+                idle_high=True,
+            )
 
-        else:
-            annotations = []
+            annotations = decoder.decode(
+                self.buffer,
+                config,
+            )
 
+            if not annotations:
+                annotations = [
+                    DecodeAnnotation(
+                        start_sample=0,
+                        end_sample=0,
+                        protocol="UART",
+                        type="WARNING",
+                        value="",
+                        text=(
+                            "No UART frame found. Check RX channel, "
+                            "baudrate, data bits, parity and stop bits."
+                        ),
+                        error=True,
+                        error_reason="No UART start bit detected",
+                    )
+                ]
+            # Đưa kết quả decoder lên bảng giao diện
         self._set_annotations(annotations)
 
     def clear_results(self):
