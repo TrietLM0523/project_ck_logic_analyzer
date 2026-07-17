@@ -14,6 +14,8 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem,
     QHeaderView,
     QGroupBox,
+    QFileDialog,
+    QMessageBox,
 )
 from PyQt6.QtGui import QColor, QBrush
 from data.logic_sample_buffer import LogicSampleBuffer
@@ -21,6 +23,7 @@ from decoder.decode_annotation import DecodeAnnotation
 from decoder.spi_decoder import SPIDecoder, SPIConfig
 from decoder.i2c_decoder import I2CDecoder, I2CConfig
 from decoder.uart_decoder import UARTDecoder, UARTConfig
+from fileio.csv_exporter import export_annotations_csv
 from config.app_config import CHANNEL_NAMES
 
 
@@ -46,11 +49,14 @@ class DecoderPanel(QWidget):
 
         self.button_decode = QPushButton("Decode")
         self.button_clear = QPushButton("Clear")
+        self.button_export = QPushButton("Export CSV")
+        self.button_export.setEnabled(False)
 
         top_bar.addWidget(self.label)
         top_bar.addWidget(self.decoder_combo)
         top_bar.addStretch()
         top_bar.addWidget(self.button_decode)
+        top_bar.addWidget(self.button_export)
         top_bar.addWidget(self.button_clear)
 
         layout.addLayout(top_bar)
@@ -171,6 +177,7 @@ class DecoderPanel(QWidget):
 
         self.button_decode.clicked.connect(self.decode_selected)
         self.button_clear.clicked.connect(self.clear_results)
+        self.button_export.clicked.connect(self.export_results)
 
     def _make_channel_combo(self, default_index: int) -> QComboBox:
         combo = QComboBox()
@@ -285,12 +292,69 @@ class DecoderPanel(QWidget):
             # Đưa kết quả decoder lên bảng giao diện
         self._set_annotations(annotations)
 
+    def export_results(self):
+        if self.buffer is None:
+            QMessageBox.warning(
+                self,
+                "Export CSV",
+                "No capture buffer is available.",
+            )
+            return
+
+        if not self.annotations:
+            QMessageBox.information(
+                self,
+                "Export CSV",
+                "There are no decoded results to export.",
+            )
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export decoded annotations",
+            "decoded_annotations.csv",
+            "CSV files (*.csv)",
+        )
+
+        # Người dùng bấm Cancel.
+        if not file_path:
+            return
+
+        if not file_path.lower().endswith(".csv"):
+            file_path += ".csv"
+
+        try:
+            row_count = export_annotations_csv(
+                file_path=file_path,
+                annotations=self.annotations,
+                sample_rate_hz=self.buffer.sample_rate_hz,
+            )
+
+        except (OSError, ValueError) as error:
+            QMessageBox.critical(
+                self,
+                "Export failed",
+                str(error),
+            )
+            return
+
+        QMessageBox.information(
+            self,
+            "Export completed",
+            f"Exported {row_count} decoded annotations.",
+        )
+
     def clear_results(self):
         self.annotations = []
         self.table.setRowCount(0)
+        self.button_export.setEnabled(False)
 
-    def _set_annotations(self, annotations: List[DecodeAnnotation]):
+    def _set_annotations(
+        self,
+        annotations: List[DecodeAnnotation],
+    ):
         self.annotations = annotations
+        self.button_export.setEnabled(bool(annotations))
         self._refresh_table()
 
     def _refresh_table(self):
