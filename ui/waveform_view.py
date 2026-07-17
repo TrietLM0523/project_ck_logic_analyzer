@@ -1,10 +1,11 @@
 # ui/waveform_view.py
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import QWidget
 
 from config.app_config import CHANNEL_NAMES
+from decoder.decode_annotation import DecodeAnnotation
 
 
 class WaveformView(QWidget):
@@ -19,6 +20,10 @@ class WaveformView(QWidget):
     Software trigger marker:
     - Trigger sample được đặt từ MainWindow sau khi tìm cạnh
     - Marker T hiển thị vị trí cạnh trigger
+
+    Decode annotation overlay:
+    - DecoderPanel gửi danh sách DecodeAnnotation sang widget
+    - Mỗi annotation được vẽ theo start_sample/end_sample
 
     Timing cursors:
     - Shift + Left Click: đặt Cursor A
@@ -35,7 +40,7 @@ class WaveformView(QWidget):
         self.samples_per_pixel = 10.0
 
         self.left_margin = 80
-        self.top_margin = 30
+        self.top_margin = 92
         self.channel_height = 55
         self.channel_gap = 5
 
@@ -44,16 +49,20 @@ class WaveformView(QWidget):
 
         self.trigger_sample: int | None = None
 
+        # M11: kết quả decode dùng để vẽ các hộp trên waveform.
+        self.annotations: list[DecodeAnnotation] = []
+
         self.cursor_a_sample: int | None = None
         self.cursor_b_sample: int | None = None
 
-        self.setMinimumHeight(500)
+        self.setMinimumHeight(580)
         self.setMouseTracking(True)
 
     def set_buffer(self, buffer):
         self.buffer = buffer
         self.viewport_start_sample = 0
         self.trigger_sample = None
+        self.annotations = []
         self.clear_cursors()
 
         if buffer is not None:
@@ -77,6 +86,7 @@ class WaveformView(QWidget):
 
         self._draw_time_grid(painter)
         self._draw_channels(painter)
+        self._draw_annotations(painter)
         self._draw_trigger(painter)
         self._draw_cursors(painter)
         self._draw_cursor_measurement(painter)
@@ -256,6 +266,133 @@ class WaveformView(QWidget):
             prev_x = x
             prev_y = y
             prev_bit = bit
+
+    def set_annotations(
+        self,
+        annotations: list[DecodeAnnotation],
+    ):
+        """
+        Nhận kết quả decode từ DecoderPanel.
+
+        WaveformView không tự decode. Nó chỉ dùng vị trí sample
+        trong DecodeAnnotation để vẽ đúng khoảng thời gian.
+        """
+
+        self.annotations = list(annotations)
+        self.update()
+
+    def clear_annotations(self):
+        self.annotations = []
+        self.update()
+
+    def _draw_annotations(self, painter: QPainter):
+        if self.buffer is None or not self.annotations:
+            return
+
+        wave_left = self.left_margin
+        wave_right = self.width() - 20
+
+        visible_start = self.viewport_start_sample
+        visible_end = self.x_to_sample(wave_right)
+
+        lane_top = 65
+        lane_height = 22
+
+        painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        painter.setPen(QPen(QColor(180, 180, 180)))
+        painter.drawText(10, lane_top + 16, "DECODE")
+
+        painter.save()
+        painter.setClipRect(
+            wave_left,
+            lane_top,
+            max(1, wave_right - wave_left),
+            lane_height,
+        )
+
+        for annotation in self.annotations:
+            # WARNING giả ở sample 0 chỉ phục vụ bảng, không vẽ overlay.
+            if annotation.type.upper() == "WARNING":
+                continue
+
+            start_sample = int(annotation.start_sample)
+            end_sample = int(annotation.end_sample)
+
+            if end_sample < start_sample:
+                start_sample, end_sample = end_sample, start_sample
+
+            if end_sample < visible_start or start_sample > visible_end:
+                continue
+
+            x_start = max(
+                float(wave_left),
+                self.sample_to_x(start_sample),
+            )
+            x_end = min(
+                float(wave_right),
+                self.sample_to_x(max(end_sample, start_sample + 1)),
+            )
+
+            width = max(3.0, x_end - x_start)
+            if x_start >= wave_right or x_start + width <= wave_left:
+                continue
+
+            rect = QRectF(
+                x_start,
+                lane_top,
+                min(width, wave_right - x_start),
+                lane_height - 2,
+            )
+
+            fill_color = self._annotation_color(annotation)
+            border_color = fill_color.lighter(145)
+
+            painter.fillRect(rect, fill_color)
+            painter.setPen(QPen(border_color, 1))
+            painter.drawRect(rect)
+
+            if rect.width() >= 12:
+                label = self._annotation_label(annotation)
+                available_width = max(1, int(rect.width()) - 6)
+                label = painter.fontMetrics().elidedText(
+                    label,
+                    Qt.TextElideMode.ElideRight,
+                    available_width,
+                )
+
+                painter.setPen(QPen(QColor(245, 245, 245)))
+                painter.drawText(
+                    rect.adjusted(3, 0, -3, 0),
+                    (Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter),
+                    label,
+                )
+
+        painter.restore()
+
+    @staticmethod
+    def _annotation_label(annotation: DecodeAnnotation) -> str:
+        text = str(annotation.text).strip()
+        value = str(annotation.value).strip()
+        annotation_type = str(annotation.type).strip()
+
+        body = text or value or annotation_type
+        return f"{annotation.protocol}: {body}"
+
+    @staticmethod
+    def _annotation_color(annotation: DecodeAnnotation) -> QColor:
+        if annotation.error:
+            return QColor(150, 55, 55, 220)
+
+        protocol = str(annotation.protocol).upper()
+
+        if protocol == "UART":
+            return QColor(45, 105, 175, 220)
+        if protocol == "I2C":
+            return QColor(35, 135, 95, 220)
+        if protocol == "SPI":
+            return QColor(175, 105, 35, 220)
+
+        return QColor(95, 95, 120, 220)
 
     def _draw_trigger(self, painter: QPainter):
         if self.buffer is None or self.trigger_sample is None:

@@ -1,6 +1,6 @@
 import sys
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QSettings, Qt
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from config.runtime_config import resolve_sigrok_cli_path
 from data.logic_sample_buffer import LogicSampleBuffer
 from driver.demo_driver import DemoDriver
 from driver.sigrok_cli_driver import (
@@ -31,20 +32,17 @@ from trigger.trigger_detector import find_trigger_sample
 from ui.decoder_panel import DecoderPanel
 from ui.waveform_view import WaveformView
 
-SIGROK_CLI_PATH = (
-    r"E:\WORK\pach_kha\ET\Embedded_Systems_and_Interfaces" r"\sigrok_cli\sigrok-cli\sigrok-cli.exe"
-)
-
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("Logic Analyzer App - Milestone 10 Software Trigger")
-        self.resize(1450, 840)
+        self.setWindowTitle("Logic Analyzer App")
+        self.resize(1450, 900)
 
         self.current_buffer: LogicSampleBuffer | None = None
         self.current_source_name = "None"
+        self.settings = QSettings("EmbeddedSystemsLab", "LogicAnalyzerApp")
 
         root = QWidget()
         root_layout = QVBoxLayout(root)
@@ -60,7 +58,7 @@ class MainWindow(QMainWindow):
         self.source_combo = QComboBox()
         self.source_combo.addItem("Demo", "demo")
         self.source_combo.addItem("Saleae Clone", "saleae")
-        self.source_combo.addItem("Pico 2 - Pending", "pico")
+        self.source_combo.addItem("Pico 2 Product MCU", "pico")
 
         self.sample_rate_label = QLabel("Sample rate:")
         self.sample_rate_combo = QComboBox()
@@ -105,6 +103,7 @@ class MainWindow(QMainWindow):
         self.button_save_session = QPushButton("Save Session")
         self.button_open_session = QPushButton("Open Session")
         self.button_fit = QPushButton("Fit View")
+        self.button_clear_capture = QPushButton("Clear Capture")
 
         capture_bar.addWidget(self.title)
         capture_bar.addStretch()
@@ -124,6 +123,7 @@ class MainWindow(QMainWindow):
         capture_bar.addWidget(self.button_save_session)
         capture_bar.addWidget(self.button_open_session)
         capture_bar.addWidget(self.button_fit)
+        capture_bar.addWidget(self.button_clear_capture)
 
         root_layout.addLayout(capture_bar)
 
@@ -158,11 +158,91 @@ class MainWindow(QMainWindow):
         self.button_save_session.clicked.connect(self.save_session)
         self.button_open_session.clicked.connect(self.open_session)
         self.button_fit.clicked.connect(self.fit_view)
+        self.button_clear_capture.clicked.connect(self.clear_capture)
         self.trigger_combo.currentIndexChanged.connect(self.update_trigger_controls)
+        self.source_combo.currentIndexChanged.connect(self.update_source_controls)
 
+        # M11: mỗi khi DecoderPanel đổi kết quả decode,
+        # WaveformView nhận cùng danh sách annotation để vẽ overlay.
+        self.decoder_panel.annotations_changed.connect(self.waveform_view.set_annotations)
+
+        self.restore_settings()
         self.statusBar().showMessage("Ready")
         self.update_trigger_controls()
+        self.update_source_controls()
         self.show_welcome_message()
+
+    def update_source_controls(self):
+        """Update UI hints for the selected capture backend."""
+
+        source = self.source_combo.currentData()
+
+        if source == "pico":
+            self.statusBar().showMessage("Pico 2 backend is reserved for the product MCU firmware")
+        else:
+            self.statusBar().showMessage("Ready")
+
+    def restore_settings(self):
+        """Restore the user's last capture configuration."""
+
+        geometry = self.settings.value("window_geometry")
+        if geometry is not None:
+            self.restoreGeometry(geometry)
+
+        self._select_combo_data(
+            self.source_combo,
+            self.settings.value("source", "demo"),
+        )
+        self._select_combo_data(
+            self.sample_rate_combo,
+            int(self.settings.value("sample_rate_hz", 1_000_000)),
+        )
+        self.duration_spin.setValue(int(self.settings.value("duration_ms", 200)))
+
+        saved_trigger = self.settings.value("trigger_edge", "disabled")
+        trigger_value = None if saved_trigger == "disabled" else saved_trigger
+        self._select_combo_data(self.trigger_combo, trigger_value)
+        self._select_combo_data(
+            self.trigger_channel_combo,
+            int(self.settings.value("trigger_channel", 0)),
+        )
+        self.pretrigger_spin.setValue(int(self.settings.value("pretrigger_percent", 30)))
+
+    def save_settings(self):
+        """Persist UI configuration between application runs."""
+
+        self.settings.setValue("window_geometry", self.saveGeometry())
+        self.settings.setValue("source", self.source_combo.currentData())
+        self.settings.setValue(
+            "sample_rate_hz",
+            int(self.sample_rate_combo.currentData()),
+        )
+        self.settings.setValue("duration_ms", self.duration_spin.value())
+
+        trigger_value = self.trigger_combo.currentData()
+        self.settings.setValue(
+            "trigger_edge",
+            "disabled" if trigger_value is None else trigger_value,
+        )
+        self.settings.setValue(
+            "trigger_channel",
+            int(self.trigger_channel_combo.currentData()),
+        )
+        self.settings.setValue(
+            "pretrigger_percent",
+            self.pretrigger_spin.value(),
+        )
+
+    @staticmethod
+    def _select_combo_data(combo: QComboBox, target_value):
+        for index in range(combo.count()):
+            if combo.itemData(index) == target_value:
+                combo.setCurrentIndex(index)
+                return
+
+    def closeEvent(self, event):
+        self.save_settings()
+        super().closeEvent(event)
 
     def update_trigger_controls(self):
         enabled = self.trigger_combo.currentData() is not None
@@ -173,14 +253,21 @@ class MainWindow(QMainWindow):
         lines = [
             "Logic Analyzer App",
             "",
-            "Milestone 10 software trigger:",
-            "- Select Rising, Falling or Either edge",
-            "- Select CH1..CH8",
-            "- Pre-trigger controls marker position in the view",
+            "Capture backends:",
+            "- DemoDriver: generated SPI, I2C and UART samples",
+            "- SigrokCliDriver: Saleae clone hardware capture",
+            "- PicoDriver: final product MCU backend, connected with firmware",
             "",
-            "Important:",
-            "This milestone searches for an edge after capture.",
-            "True hardware trigger will be implemented in Pico firmware.",
+            "Features:",
+            "- SPI, I2C and UART decoding",
+            "- Decode overlay on the waveform",
+            "- Timing cursors and software trigger",
+            "- CSV export and .la session save/load",
+            "",
+            "Cursor controls:",
+            "- Shift + left click: Cursor A",
+            "- Ctrl + left click: Cursor B",
+            "- Right click: clear cursors",
         ]
         self.output.setPlainText("\n".join(lines))
 
@@ -188,6 +275,25 @@ class MainWindow(QMainWindow):
         source = self.source_combo.currentData()
         sample_rate_hz = int(self.sample_rate_combo.currentData())
         duration_ms = self.duration_spin.value()
+
+        estimated_sample_count = round(sample_rate_hz * duration_ms / 1000)
+
+        if estimated_sample_count > 5_000_000:
+            response = QMessageBox.question(
+                self,
+                "Large capture",
+                (
+                    f"This capture will contain approximately "
+                    f"{estimated_sample_count:,} samples. "
+                    "Waveform rendering and decoding may take longer. "
+                    "Continue?"
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+
+            if response != QMessageBox.StandardButton.Yes:
+                return
 
         if source == "pico":
             QMessageBox.information(
@@ -259,8 +365,10 @@ class MainWindow(QMainWindow):
         sample_rate_hz: int,
         duration_ms: int,
     ) -> LogicSampleBuffer:
+        executable = resolve_sigrok_cli_path()
+
         driver = SigrokCliDriver(
-            executable=SIGROK_CLI_PATH,
+            executable=executable,
             hardware_driver="fx2lafw",
         )
         return driver.capture(
@@ -387,6 +495,18 @@ class MainWindow(QMainWindow):
         lines.append(f"Trigger sample: {trigger_sample}")
         lines.append(f"Trigger time: {trigger_time_us:.3f} us")
         lines.append(f"View pre-trigger position: " f"{self.pretrigger_spin.value()}%")
+
+    def clear_capture(self):
+        """Remove the current capture and all derived display state."""
+
+        self.current_buffer = None
+        self.current_source_name = "None"
+
+        self.waveform_view.set_buffer(None)
+        self.decoder_panel.set_buffer(None)
+
+        self.show_welcome_message()
+        self.statusBar().showMessage("Capture cleared", 3000)
 
     def save_session(self):
         if self.current_buffer is None:

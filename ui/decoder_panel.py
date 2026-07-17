@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
 )
 from PyQt6.QtGui import QColor, QBrush
+from PyQt6.QtCore import pyqtSignal
 from data.logic_sample_buffer import LogicSampleBuffer
 from decoder.decode_annotation import DecodeAnnotation
 from decoder.spi_decoder import SPIDecoder, SPIConfig
@@ -31,6 +32,8 @@ class DecoderPanel(QWidget):
     """
     Panel chọn decoder, chọn channel mapping và hiển thị bảng kết quả decode.
     """
+
+    annotations_changed = pyqtSignal(list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -348,6 +351,7 @@ class DecoderPanel(QWidget):
         self.annotations = []
         self.table.setRowCount(0)
         self.button_export.setEnabled(False)
+        self.annotations_changed.emit([])
 
     def set_annotations(
         self,
@@ -365,6 +369,7 @@ class DecoderPanel(QWidget):
         self.annotations = annotations
         self.button_export.setEnabled(bool(annotations))
         self._refresh_table()
+        self.annotations_changed.emit(list(self.annotations))
 
     def _refresh_table(self):
         self.table.setRowCount(len(self.annotations))
