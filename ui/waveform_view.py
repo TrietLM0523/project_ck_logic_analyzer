@@ -41,8 +41,11 @@ class WaveformView(QWidget):
 
         self.left_margin = 80
         self.top_margin = 92
-        self.channel_height = 55
-        self.channel_gap = 5
+        # Chiều cao channel sẽ được tính động khi widget resize.
+        self.minimum_channel_height = 24
+
+        # Vùng cố định phía dưới dành cho cursor và status.
+        self.footer_height = 58
 
         self.dragging = False
         self.last_mouse_x = 0
@@ -55,7 +58,7 @@ class WaveformView(QWidget):
         self.cursor_a_sample: int | None = None
         self.cursor_b_sample: int | None = None
 
-        self.setMinimumHeight(580)
+        self.setMinimumHeight(360)
         self.setMouseTracking(True)
 
     def set_buffer(self, buffer):
@@ -89,6 +92,7 @@ class WaveformView(QWidget):
         self._draw_annotations(painter)
         self._draw_trigger(painter)
         self._draw_cursors(painter)
+        self._draw_footer_background(painter)
         self._draw_cursor_measurement(painter)
         self._draw_status_text(painter)
 
@@ -105,6 +109,9 @@ class WaveformView(QWidget):
         )
 
     def _draw_status_text(self, painter: QPainter):
+        """
+        Vẽ trạng thái capture trong dòng thứ hai của footer.
+        """
         painter.setPen(QPen(QColor(180, 180, 180)))
         painter.setFont(QFont("Consolas", 9))
 
@@ -115,9 +122,18 @@ class WaveformView(QWidget):
             f"start={start_time_us:.1f} us | "
             f"zoom={self.samples_per_pixel:.2f} samples/px"
         )
-        painter.drawText(10, self.height() - 10, text)
+
+        footer_top = self._wave_bottom()
+        painter.drawText(
+            10,
+            footer_top + 42,
+            text,
+        )
 
     def _draw_cursor_measurement(self, painter: QPainter):
+        """
+        Vẽ thông tin Cursor A/B trong dòng đầu của footer.
+        """
         painter.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
 
         measurement = self.cursor_measurement()
@@ -146,41 +162,63 @@ class WaveformView(QWidget):
             painter.setPen(QPen(QColor(150, 150, 150)))
             text = "Timing cursors: " "Shift+Click=A | Ctrl+Click=B | Right Click=clear"
 
-        painter.drawText(10, self.height() - 27, text)
+        footer_top = self._wave_bottom()
+        painter.drawText(
+            10,
+            footer_top + 20,
+            text,
+        )
 
-    def _draw_time_grid(self, painter: QPainter):
-        width = self.width()
-        height = self.height()
-
+    def _draw_time_grid(
+        self,
+        painter: QPainter,
+    ):
         wave_left = self.left_margin
-        wave_right = width - 20
-        wave_width = max(1, wave_right - wave_left)
+        wave_right = self.width() - 20
+        wave_bottom = self._wave_bottom()
+
+        wave_width = max(
+            1,
+            wave_right - wave_left,
+        )
 
         visible_samples = wave_width * self.samples_per_pixel
+
         start_sample = self.viewport_start_sample
         end_sample = start_sample + visible_samples
 
         grid_step_samples = self._choose_grid_step(visible_samples)
+
         first_grid = int(start_sample // grid_step_samples) * grid_step_samples
 
         painter.setFont(QFont("Consolas", 8))
 
         sample_position = first_grid
+
         while sample_position <= end_sample:
             x = self.sample_to_x(sample_position)
 
             if wave_left <= x <= wave_right:
+                # Đường grid chỉ vẽ trong vùng waveform,
+                # không chọc xuống footer cursor/status.
                 painter.setPen(QPen(QColor(55, 55, 55)))
+
                 painter.drawLine(
                     int(x),
                     self.top_margin - 15,
                     int(x),
-                    height - 40,
+                    wave_bottom,
                 )
 
                 time_us = self.buffer.sample_to_time_us(int(sample_position))
+
                 painter.setPen(QPen(QColor(150, 150, 150)))
-                painter.drawText(int(x) + 3, 15, f"{time_us:.0f} us")
+
+                painter.drawText(
+                    int(x) + 3,
+                    15,
+                    f"{time_us:.0f} us",
+                )
 
             sample_position += grid_step_samples
 
@@ -213,11 +251,22 @@ class WaveformView(QWidget):
         wave_right = width - 20
         wave_width = max(1, wave_right - wave_left)
 
-        y_top = self.top_margin + channel_index * self.channel_height
-        y_mid = y_top + self.channel_height // 2
+        channel_height = self._dynamic_channel_height()
 
-        high_y = y_mid - 14
-        low_y = y_mid + 14
+        y_top = self.top_margin + channel_index * channel_height
+
+        y_mid = int(y_top + channel_height / 2)
+
+        signal_amplitude = max(
+            5,
+            min(
+                14,
+                int(channel_height * 0.27),
+            ),
+        )
+
+        high_y = y_mid - signal_amplitude
+        low_y = y_mid + signal_amplitude
 
         if channel_index < len(CHANNEL_NAMES):
             label = CHANNEL_NAMES[channel_index]
@@ -414,7 +463,7 @@ class WaveformView(QWidget):
             int(x),
             self.top_margin - 15,
             int(x),
-            self.height() - 40,
+            self._wave_bottom(),
         )
 
         time_seconds = self.trigger_sample / self.buffer.sample_rate_hz
@@ -473,7 +522,7 @@ class WaveformView(QWidget):
             int(x),
             self.top_margin - 15,
             int(x),
-            self.height() - 40,
+            self._wave_bottom(),
         )
 
         time_seconds = sample_index / self.buffer.sample_rate_hz
@@ -512,6 +561,13 @@ class WaveformView(QWidget):
             return
 
         mouse_x = event.position().x()
+        mouse_y = event.position().y()
+
+        # Không zoom khi con trỏ nằm ở footer hoặc ngoài vùng waveform.
+        if not self._is_inside_wave_area(mouse_x, mouse_y):
+            event.ignore()
+            return
+
         mouse_sample_before = self.x_to_sample(mouse_x)
 
         delta = event.angleDelta().y()
@@ -530,9 +586,19 @@ class WaveformView(QWidget):
 
         self._clamp_viewport()
         self.update()
+        event.accept()
 
     def mousePressEvent(self, event):
         if self.buffer is None:
+            return
+
+        mouse_x = event.position().x()
+        mouse_y = event.position().y()
+
+        # Chỉ pan/đặt cursor bên trong vùng waveform.
+        # Click ở footer không làm thay đổi cursor hay viewport.
+        if not self._is_inside_wave_area(mouse_x, mouse_y):
+            event.ignore()
             return
 
         if event.button() == Qt.MouseButton.RightButton:
@@ -541,10 +607,10 @@ class WaveformView(QWidget):
             return
 
         if event.button() != Qt.MouseButton.LeftButton:
+            event.ignore()
             return
 
         modifiers = event.modifiers()
-        mouse_x = event.position().x()
 
         if modifiers & Qt.KeyboardModifier.ShiftModifier:
             self.set_cursor_a_from_x(mouse_x)
@@ -558,6 +624,7 @@ class WaveformView(QWidget):
 
         self.dragging = True
         self.last_mouse_x = mouse_x
+        event.accept()
 
     def mouseMoveEvent(self, event):
         if self.dragging and self.buffer is not None:
@@ -739,4 +806,88 @@ class WaveformView(QWidget):
         self.viewport_start_sample = min(
             self.viewport_start_sample,
             max_start,
+        )
+
+    def _is_inside_wave_area(
+        self,
+        x: float,
+        y: float,
+    ) -> bool:
+        """
+        Kiểm tra con trỏ chuột có nằm trong vùng waveform hay không.
+        Footer cursor/status không phải vùng tương tác pan/zoom.
+        """
+        return (
+            self.left_margin <= x <= self.width() - 20
+            and self.top_margin <= y < self._wave_bottom()
+        )
+
+    def resizeEvent(self, event):
+        """
+        Khi splitter làm widget đổi kích thước, tính lại giới hạn viewport
+        và yêu cầu vẽ lại theo chiều cao channel mới.
+        """
+        super().resizeEvent(event)
+        self._clamp_viewport()
+        self.update()
+
+    def _wave_bottom(self) -> int:
+        """
+        Tọa độ đáy của vùng waveform.
+
+        Phần bên dưới được dành riêng cho cursor/status.
+        """
+        return max(
+            self.top_margin + 1,
+            self.height() - self.footer_height,
+        )
+
+    def _dynamic_channel_height(self) -> float:
+        """
+        Chia đều chiều cao khả dụng cho các channel.
+
+        Với minimumHeight hiện tại, mỗi channel vẫn đủ cao để đọc,
+        nhưng không được phép tràn xuống footer.
+        """
+        if self.buffer is None:
+            channel_count = 8
+        else:
+            channel_count = max(
+                1,
+                self.buffer.channel_count,
+            )
+
+        available_height = max(
+            1,
+            self._wave_bottom() - self.top_margin,
+        )
+
+        calculated_height = available_height / channel_count
+
+        return max(
+            float(self.minimum_channel_height),
+            calculated_height,
+        )
+
+    def _draw_footer_background(
+        self,
+        painter: QPainter,
+    ):
+        footer_top = self._wave_bottom()
+
+        painter.fillRect(
+            0,
+            footer_top,
+            self.width(),
+            self.footer_height,
+            QColor(20, 20, 20),
+        )
+
+        painter.setPen(QPen(QColor(65, 65, 65)))
+
+        painter.drawLine(
+            0,
+            footer_top,
+            self.width(),
+            footer_top,
         )
