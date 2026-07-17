@@ -1,5 +1,3 @@
-# main.py
-
 import sys
 
 from PyQt6.QtCore import Qt
@@ -29,6 +27,7 @@ from fileio.la_session import (
     load_la_session,
     save_la_session,
 )
+from trigger.trigger_detector import find_trigger_sample
 from ui.decoder_panel import DecoderPanel
 from ui.waveform_view import WaveformView
 
@@ -41,8 +40,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("Logic Analyzer App - Milestone 8 Hardware Capture")
-        self.resize(1350, 820)
+        self.setWindowTitle("Logic Analyzer App - Milestone 10 Software Trigger")
+        self.resize(1450, 840)
 
         self.current_buffer: LogicSampleBuffer | None = None
         self.current_source_name = "None"
@@ -60,44 +59,17 @@ class MainWindow(QMainWindow):
         self.source_label = QLabel("Source:")
         self.source_combo = QComboBox()
         self.source_combo.addItem("Demo", "demo")
-        self.source_combo.addItem(
-            "Saleae Clone",
-            "saleae",
-        )
-        self.source_combo.addItem(
-            "Pico 2 - Pending",
-            "pico",
-        )
+        self.source_combo.addItem("Saleae Clone", "saleae")
+        self.source_combo.addItem("Pico 2 - Pending", "pico")
 
         self.sample_rate_label = QLabel("Sample rate:")
         self.sample_rate_combo = QComboBox()
-
-        self.sample_rate_combo.addItem(
-            "250 kHz",
-            250_000,
-        )
-        self.sample_rate_combo.addItem(
-            "500 kHz",
-            500_000,
-        )
-        self.sample_rate_combo.addItem(
-            "1 MHz",
-            1_000_000,
-        )
-        self.sample_rate_combo.addItem(
-            "2 MHz",
-            2_000_000,
-        )
-        self.sample_rate_combo.addItem(
-            "4 MHz",
-            4_000_000,
-        )
-        self.sample_rate_combo.addItem(
-            "8 MHz",
-            8_000_000,
-        )
-
-        # Mặc định chọn 1 MHz.
+        self.sample_rate_combo.addItem("250 kHz", 250_000)
+        self.sample_rate_combo.addItem("500 kHz", 500_000)
+        self.sample_rate_combo.addItem("1 MHz", 1_000_000)
+        self.sample_rate_combo.addItem("2 MHz", 2_000_000)
+        self.sample_rate_combo.addItem("4 MHz", 4_000_000)
+        self.sample_rate_combo.addItem("8 MHz", 8_000_000)
         self.sample_rate_combo.setCurrentIndex(2)
 
         self.duration_label = QLabel("Duration:")
@@ -107,6 +79,28 @@ class MainWindow(QMainWindow):
         self.duration_spin.setSingleStep(50)
         self.duration_spin.setSuffix(" ms")
 
+        self.trigger_label = QLabel("Trigger:")
+        self.trigger_combo = QComboBox()
+        self.trigger_combo.addItem("Disabled", None)
+        self.trigger_combo.addItem("Rising edge", "rising")
+        self.trigger_combo.addItem("Falling edge", "falling")
+        self.trigger_combo.addItem("Either edge", "either")
+
+        self.trigger_channel_label = QLabel("Channel:")
+        self.trigger_channel_combo = QComboBox()
+        for channel_index in range(8):
+            self.trigger_channel_combo.addItem(
+                f"CH{channel_index + 1}",
+                channel_index,
+            )
+
+        self.pretrigger_label = QLabel("Pre-trigger:")
+        self.pretrigger_spin = QSpinBox()
+        self.pretrigger_spin.setRange(0, 90)
+        self.pretrigger_spin.setValue(30)
+        self.pretrigger_spin.setSingleStep(10)
+        self.pretrigger_spin.setSuffix(" %")
+
         self.button_start_capture = QPushButton("Start Capture")
         self.button_save_session = QPushButton("Save Session")
         self.button_open_session = QPushButton("Open Session")
@@ -114,16 +108,18 @@ class MainWindow(QMainWindow):
 
         capture_bar.addWidget(self.title)
         capture_bar.addStretch()
-
         capture_bar.addWidget(self.source_label)
         capture_bar.addWidget(self.source_combo)
-
         capture_bar.addWidget(self.sample_rate_label)
         capture_bar.addWidget(self.sample_rate_combo)
-
         capture_bar.addWidget(self.duration_label)
         capture_bar.addWidget(self.duration_spin)
-
+        capture_bar.addWidget(self.trigger_label)
+        capture_bar.addWidget(self.trigger_combo)
+        capture_bar.addWidget(self.trigger_channel_label)
+        capture_bar.addWidget(self.trigger_channel_combo)
+        capture_bar.addWidget(self.pretrigger_label)
+        capture_bar.addWidget(self.pretrigger_spin)
         capture_bar.addWidget(self.button_start_capture)
         capture_bar.addWidget(self.button_save_session)
         capture_bar.addWidget(self.button_open_session)
@@ -135,7 +131,6 @@ class MainWindow(QMainWindow):
         # Main content
         # ==========================================================
         main_splitter = QSplitter(Qt.Orientation.Vertical)
-
         self.waveform_view = WaveformView()
 
         bottom_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -154,7 +149,6 @@ class MainWindow(QMainWindow):
         main_splitter.setSizes([570, 230])
 
         root_layout.addWidget(main_splitter)
-
         self.setCentralWidget(root)
 
         # ==========================================================
@@ -164,39 +158,35 @@ class MainWindow(QMainWindow):
         self.button_save_session.clicked.connect(self.save_session)
         self.button_open_session.clicked.connect(self.open_session)
         self.button_fit.clicked.connect(self.fit_view)
+        self.trigger_combo.currentIndexChanged.connect(self.update_trigger_controls)
 
         self.statusBar().showMessage("Ready")
-
+        self.update_trigger_controls()
         self.show_welcome_message()
+
+    def update_trigger_controls(self):
+        enabled = self.trigger_combo.currentData() is not None
+        self.trigger_channel_combo.setEnabled(enabled)
+        self.pretrigger_spin.setEnabled(enabled)
 
     def show_welcome_message(self):
         lines = [
             "Logic Analyzer App",
             "",
-            "Available capture sources:",
-            "- Demo: generated SPI, I2C and UART signals",
-            "- Saleae Clone: real capture through sigrok-cli",
-            "- Pico 2: MCU core of the final product, pending hardware",
+            "Milestone 10 software trigger:",
+            "- Select Rising, Falling or Either edge",
+            "- Select CH1..CH8",
+            "- Pre-trigger controls marker position in the view",
             "",
-            "Recommended Saleae UART test:",
-            "- Sample rate: 1 MHz",
-            "- Duration: 200 ms",
-            "- Arduino D7 -> Saleae CH7",
-            "- Arduino GND -> Saleae GND",
-            "- UART decoder: CH7, 9600 baud, 8N1",
+            "Important:",
+            "This milestone searches for an edge after capture.",
+            "True hardware trigger will be implemented in Pico firmware.",
         ]
-
         self.output.setPlainText("\n".join(lines))
 
     def run_capture(self):
-        """
-        Chọn nguồn capture và tạo LogicSampleBuffer.
-        """
-
         source = self.source_combo.currentData()
-
         sample_rate_hz = int(self.sample_rate_combo.currentData())
-
         duration_ms = self.duration_spin.value()
 
         if source == "pico":
@@ -204,19 +194,17 @@ class MainWindow(QMainWindow):
                 self,
                 "Pico 2",
                 (
-                    "Pico 2 integration is prepared as the "
-                    "final hardware source, but its firmware "
-                    "protocol must be tested with the board."
+                    "Pico 2 is the MCU core of the final logic "
+                    "analyzer. Its capture and hardware-trigger "
+                    "protocol will be connected after testing "
+                    "the board firmware."
                 ),
             )
             return
 
         self.button_start_capture.setEnabled(False)
-
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-
         self.statusBar().showMessage("Capturing...")
-
         QApplication.processEvents()
 
         try:
@@ -225,31 +213,22 @@ class MainWindow(QMainWindow):
                     sample_rate_hz=sample_rate_hz,
                     duration_ms=duration_ms,
                 )
-
                 source_name = "Demo"
-
             elif source == "saleae":
                 buffer = self.capture_saleae(
                     sample_rate_hz=sample_rate_hz,
                     duration_ms=duration_ms,
                 )
-
                 source_name = "Saleae Clone"
-
             else:
                 raise ValueError(f"Unsupported capture source: {source}")
 
-        except (
-            OSError,
-            ValueError,
-            SigrokCliError,
-        ) as error:
+        except (OSError, ValueError, SigrokCliError) as error:
             QMessageBox.critical(
                 self,
                 "Capture failed",
                 str(error),
             )
-
             self.statusBar().showMessage("Capture failed")
             return
 
@@ -263,7 +242,7 @@ class MainWindow(QMainWindow):
         )
 
         self.statusBar().showMessage(
-            (f"Capture completed: " f"{buffer.sample_count()} samples"),
+            f"Capture completed: {buffer.sample_count()} samples",
             5000,
         )
 
@@ -272,12 +251,7 @@ class MainWindow(QMainWindow):
         sample_rate_hz: int,
         duration_ms: int,
     ) -> LogicSampleBuffer:
-        """
-        Sinh tín hiệu demo bằng phần mềm.
-        """
-
         driver = DemoDriver(sample_rate_hz=sample_rate_hz)
-
         return driver.capture(duration_ms=duration_ms)
 
     def capture_saleae(
@@ -285,15 +259,10 @@ class MainWindow(QMainWindow):
         sample_rate_hz: int,
         duration_ms: int,
     ) -> LogicSampleBuffer:
-        """
-        Thu tín hiệu thật từ Saleae clone.
-        """
-
         driver = SigrokCliDriver(
             executable=SIGROK_CLI_PATH,
             hardware_driver="fx2lafw",
         )
-
         return driver.capture(
             sample_rate_hz=sample_rate_hz,
             duration_ms=duration_ms,
@@ -304,19 +273,16 @@ class MainWindow(QMainWindow):
         buffer: LogicSampleBuffer,
         source_name: str,
     ):
-        """
-        Đưa buffer vào waveform và decoder panel.
-        """
-
         self.current_buffer = buffer
         self.current_source_name = source_name
 
         self.waveform_view.set_buffer(buffer)
-
-        # Buffer mới nên xóa annotation của capture cũ.
         self.decoder_panel.set_buffer(buffer)
 
-        self.fit_view()
+        trigger_info = self.apply_software_trigger(buffer)
+
+        if not trigger_info["found"]:
+            self.fit_view()
 
         lines = [
             "Capture completed successfully.",
@@ -327,53 +293,107 @@ class MainWindow(QMainWindow):
             "",
         ]
 
+        self.append_trigger_report(lines, trigger_info)
+
         if source_name == "Demo":
             lines.extend(
                 [
-                    "Demo channel mapping:",
-                    "CH1 = SPI CS",
-                    "CH2 = SPI MOSI",
-                    "CH3 = SPI MISO",
-                    "CH4 = SPI SCK",
-                    "CH5 = I2C SDA",
-                    "CH6 = I2C SCL",
-                    "CH7 = UART TX",
-                    "CH8 = unused",
                     "",
-                    "Expected UART: HELLO",
-                    "UART configuration: CH7, 9600 baud, 8N1",
+                    "Demo mapping:",
+                    "CH1=SPI CS, CH2=MOSI, CH3=MISO, CH4=SCK",
+                    "CH5=I2C SDA, CH6=SCL, CH7=UART TX",
                 ]
             )
-
         elif source_name == "Saleae Clone":
             lines.extend(
                 [
-                    "Saleae channel mapping:",
-                    "sigrok D0 = project CH1",
-                    "sigrok D1 = project CH2",
-                    "...",
-                    "sigrok D6 = project CH7",
-                    "sigrok D7 = project CH8",
                     "",
-                    "For the current Arduino UART test:",
-                    "Arduino D7 -> Saleae CH7",
-                    "Arduino GND -> Saleae GND",
-                    "UART configuration: CH7, 9600 baud, 8N1",
+                    "Saleae mapping:",
+                    "sigrok D0..D7 = project CH1..CH8",
                 ]
             )
 
         self.output.setPlainText("\n".join(lines))
 
-    def save_session(self):
-        """
-        Lưu raw samples, metadata và annotation vào .la.
-        """
+    def apply_software_trigger(
+        self,
+        buffer: LogicSampleBuffer,
+    ) -> dict:
+        edge = self.trigger_combo.currentData()
 
+        if edge is None:
+            self.waveform_view.clear_trigger()
+            return {
+                "enabled": False,
+                "found": False,
+                "edge": None,
+                "channel_index": None,
+                "sample": None,
+            }
+
+        channel_index = int(self.trigger_channel_combo.currentData())
+
+        trigger_sample = find_trigger_sample(
+            buffer=buffer,
+            channel_index=channel_index,
+            edge=edge,
+        )
+
+        if trigger_sample is None:
+            self.waveform_view.clear_trigger()
+            return {
+                "enabled": True,
+                "found": False,
+                "edge": edge,
+                "channel_index": channel_index,
+                "sample": None,
+            }
+
+        self.waveform_view.set_trigger_sample(trigger_sample)
+        self.waveform_view.center_on_sample(
+            sample_index=trigger_sample,
+            position_ratio=self.pretrigger_spin.value() / 100.0,
+        )
+
+        return {
+            "enabled": True,
+            "found": True,
+            "edge": edge,
+            "channel_index": channel_index,
+            "sample": trigger_sample,
+        }
+
+    def append_trigger_report(
+        self,
+        lines: list[str],
+        trigger_info: dict,
+    ):
+        if not trigger_info["enabled"]:
+            lines.append("Software trigger: Disabled")
+            return
+
+        channel_name = f"CH{trigger_info['channel_index'] + 1}"
+        edge_name = str(trigger_info["edge"]).capitalize()
+
+        if not trigger_info["found"]:
+            lines.append(f"Software trigger: {edge_name} on {channel_name}")
+            lines.append("Trigger result: No matching edge found")
+            return
+
+        trigger_sample = int(trigger_info["sample"])
+        trigger_time_us = trigger_sample / self.current_buffer.sample_rate_hz * 1_000_000
+
+        lines.append(f"Software trigger: {edge_name} on {channel_name}")
+        lines.append(f"Trigger sample: {trigger_sample}")
+        lines.append(f"Trigger time: {trigger_time_us:.3f} us")
+        lines.append(f"View pre-trigger position: " f"{self.pretrigger_spin.value()}%")
+
+    def save_session(self):
         if self.current_buffer is None:
             QMessageBox.warning(
                 self,
                 "Save Session",
-                ("No capture data is available. " "Start a capture first."),
+                "No capture data is available.",
             )
             return
 
@@ -396,7 +416,6 @@ class MainWindow(QMainWindow):
                 buffer=self.current_buffer,
                 annotations=self.decoder_panel.annotations,
             )
-
         except (OSError, ValueError) as error:
             QMessageBox.critical(
                 self,
@@ -410,17 +429,7 @@ class MainWindow(QMainWindow):
             5000,
         )
 
-        QMessageBox.information(
-            self,
-            "Save completed",
-            ("The logic analyzer session " "was saved successfully."),
-        )
-
     def open_session(self):
-        """
-        Mở file .la và khôi phục capture.
-        """
-
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Open logic analyzer session",
@@ -433,7 +442,6 @@ class MainWindow(QMainWindow):
 
         try:
             buffer, annotations = load_la_session(file_path)
-
         except (OSError, ValueError) as error:
             QMessageBox.critical(
                 self,
@@ -446,28 +454,23 @@ class MainWindow(QMainWindow):
         self.current_source_name = "Session File"
 
         self.waveform_view.set_buffer(buffer)
-
-        # set_buffer() xóa annotation cũ.
         self.decoder_panel.set_buffer(buffer)
-
-        # Vì vậy annotation phải được nạp sau.
         self.decoder_panel.set_annotations(annotations)
-
         self.select_sample_rate(buffer.sample_rate_hz)
 
-        self.fit_view()
+        trigger_info = self.apply_software_trigger(buffer)
+        if not trigger_info["found"]:
+            self.fit_view()
 
         lines = [
             "Session loaded successfully.",
             f"File: {file_path}",
             f"Sample rate: {buffer.sample_rate_hz} Hz",
             f"Sample count: {buffer.sample_count()}",
-            ("Duration: " f"{buffer.duration_seconds() * 1000:.3f} ms"),
             f"Annotations: {len(annotations)}",
             "",
-            ("The raw samples can still be decoded again " "with another protocol configuration."),
         ]
-
+        self.append_trigger_report(lines, trigger_info)
         self.output.setPlainText("\n".join(lines))
 
         self.statusBar().showMessage(
@@ -475,58 +478,38 @@ class MainWindow(QMainWindow):
             5000,
         )
 
-    def select_sample_rate(
-        self,
-        sample_rate_hz: int,
-    ):
-        """
-        Chọn sample rate tương ứng khi mở session.
-        """
-
+    def select_sample_rate(self, sample_rate_hz: int):
         for index in range(self.sample_rate_combo.count()):
-            value = self.sample_rate_combo.itemData(index)
-
-            if value == sample_rate_hz:
+            if self.sample_rate_combo.itemData(index) == sample_rate_hz:
                 self.sample_rate_combo.setCurrentIndex(index)
                 return
 
-        # Nếu session dùng rate chưa có trong danh sách.
         self.sample_rate_combo.addItem(
             f"{sample_rate_hz} Hz",
             sample_rate_hz,
         )
-
         self.sample_rate_combo.setCurrentIndex(self.sample_rate_combo.count() - 1)
 
     def fit_view(self):
-        """
-        Zoom để hiển thị toàn bộ capture.
-        """
-
         if self.current_buffer is None:
             return
 
         visible_width = max(
             1,
-            (self.waveform_view.width() - self.waveform_view.left_margin - 20),
+            self.waveform_view.width() - self.waveform_view.left_margin - 20,
         )
-
         self.waveform_view.viewport_start_sample = 0
-
         self.waveform_view.samples_per_pixel = max(
             1.0,
-            (self.current_buffer.sample_count() / visible_width),
+            self.current_buffer.sample_count() / visible_width,
         )
-
         self.waveform_view.update()
 
 
 def main():
     app = QApplication(sys.argv)
-
     window = MainWindow()
     window.show()
-
     sys.exit(app.exec())
 
 
