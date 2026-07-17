@@ -349,6 +349,15 @@ class DecoderPanel(QWidget):
         self.table.setRowCount(0)
         self.button_export.setEnabled(False)
 
+    def set_annotations(
+        self,
+        annotations: list[DecodeAnnotation],
+    ):
+        """
+        Nạp annotation từ bên ngoài, ví dụ khi mở session .la.
+        """
+        self._set_annotations(annotations)
+
     def _set_annotations(
         self,
         annotations: List[DecodeAnnotation],
