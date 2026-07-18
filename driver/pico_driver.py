@@ -12,9 +12,9 @@ from serial.tools import list_ports
 
 from data.logic_sample_buffer import LogicSampleBuffer
 
-
 MAX_RATE_HZ = 10_000_000
 MAX_CAPTURE_SAMPLES = 65_536
+MAX_PRETRIGGER_SAMPLES = 16_384
 DEFAULT_BAUDRATE = 115_200
 
 _RATE_RE = re.compile(r"\brate=(\d+)\b")
@@ -62,9 +62,7 @@ class _ProductProtocol:
                 write_timeout=timeout,
             )
         except serial.SerialException as exc:
-            raise PicoDriverError(
-                f"Cannot open Pico serial port {port}: {exc}"
-            ) from exc
+            raise PicoDriverError(f"Cannot open Pico serial port {port}: {exc}") from exc
 
         # Give USB CDC/firmware a short time to settle.
         time.sleep(0.2)
@@ -85,21 +83,13 @@ class _ProductProtocol:
             self.ser.write((command + "\n").encode("ascii"))
             self.ser.flush()
         except (UnicodeEncodeError, serial.SerialException) as exc:
-            raise PicoDriverError(
-                f"Failed to send command {command!r}: {exc}"
-            ) from exc
+            raise PicoDriverError(f"Failed to send command {command!r}: {exc}") from exc
 
     def read_line(self) -> str:
         try:
-            return (
-                self.ser.readline()
-                .decode("ascii", errors="replace")
-                .strip()
-            )
+            return self.ser.readline().decode("ascii", errors="replace").strip()
         except serial.SerialException as exc:
-            raise PicoDriverError(
-                f"Failed while reading Pico metadata: {exc}"
-            ) from exc
+            raise PicoDriverError(f"Failed while reading Pico metadata: {exc}") from exc
 
     def read_capture_block(self) -> tuple[list[str], bytes]:
         metadata: list[str] = []
@@ -109,9 +99,7 @@ class _ProductProtocol:
 
             # readline() returns an empty string on timeout.
             if not line:
-                raise PicoDriverError(
-                    "Timed out waiting for Pico capture metadata."
-                )
+                raise PicoDriverError("Timed out waiting for Pico capture metadata.")
 
             metadata.append(line)
 
@@ -123,33 +111,24 @@ class _ProductProtocol:
 
             parts = line.split()
             if len(parts) != 2:
-                raise PicoDriverError(
-                    f"Invalid BIN header from Pico: {line!r}"
-                )
+                raise PicoDriverError(f"Invalid BIN header from Pico: {line!r}")
 
             try:
                 payload_length = int(parts[1])
             except ValueError as exc:
-                raise PicoDriverError(
-                    f"Invalid payload length in {line!r}"
-                ) from exc
+                raise PicoDriverError(f"Invalid payload length in {line!r}") from exc
 
             if payload_length < 0:
-                raise PicoDriverError(
-                    f"Negative payload length: {payload_length}"
-                )
+                raise PicoDriverError(f"Negative payload length: {payload_length}")
 
             try:
                 raw = self.ser.read(payload_length)
             except serial.SerialException as exc:
-                raise PicoDriverError(
-                    f"Failed while reading capture payload: {exc}"
-                ) from exc
+                raise PicoDriverError(f"Failed while reading capture payload: {exc}") from exc
 
             if len(raw) != payload_length:
                 raise PicoDriverError(
-                    f"Expected {payload_length} capture bytes, "
-                    f"received {len(raw)}."
+                    f"Expected {payload_length} capture bytes, " f"received {len(raw)}."
                 )
 
             tail = self.read_line()
@@ -158,9 +137,7 @@ class _ProductProtocol:
                 tail = self.read_line()
 
             if tail != "END":
-                raise PicoDriverError(
-                    f"Expected END after capture payload, got {tail!r}."
-                )
+                raise PicoDriverError(f"Expected END after capture payload, got {tail!r}.")
 
             return metadata, raw
 
@@ -233,9 +210,7 @@ class PicoDriver:
                     break
 
             if not lines:
-                raise PicoDriverError(
-                    "Pico returned no INFO response."
-                )
+                raise PicoDriverError("Pico returned no INFO response.")
 
             return lines
 
@@ -248,20 +223,14 @@ class PicoDriver:
         duration_ms = int(duration_ms)
 
         if not 1 <= sample_rate_hz <= MAX_RATE_HZ:
-            raise ValueError(
-                f"sample_rate_hz must be between 1 and {MAX_RATE_HZ}."
-            )
+            raise ValueError(f"sample_rate_hz must be between 1 and {MAX_RATE_HZ}.")
         if duration_ms <= 0:
             raise ValueError("duration_ms must be greater than zero.")
 
-        sample_count = round(
-            sample_rate_hz * duration_ms / 1000
-        )
+        sample_count = round(sample_rate_hz * duration_ms / 1000)
 
         if not 1 <= sample_count <= MAX_CAPTURE_SAMPLES:
-            maximum_duration_ms = (
-                MAX_CAPTURE_SAMPLES * 1000 / sample_rate_hz
-            )
+            maximum_duration_ms = MAX_CAPTURE_SAMPLES * 1000 / sample_rate_hz
             raise ValueError(
                 f"Requested {sample_count} samples, but Pico CAP_TIMER "
                 f"supports at most {MAX_CAPTURE_SAMPLES}. "
@@ -269,10 +238,7 @@ class PicoDriver:
                 f"{maximum_duration_ms:.3f} ms."
             )
 
-        command = (
-            f"CAP_TIMER {sample_rate_hz} {sample_count} "
-            f"0x{self.channel_mask:02x}"
-        )
+        command = f"CAP_TIMER {sample_rate_hz} {sample_count} " f"0x{self.channel_mask:02x}"
 
         # Add margin for acquisition plus USB transfer.
         acquisition_seconds = sample_count / sample_rate_hz
@@ -295,8 +261,136 @@ class PicoDriver:
 
         if samples.size != sample_count:
             raise PicoDriverError(
+                f"Pico returned {samples.size} samples, " f"but {sample_count} were requested."
+            )
+
+        return LogicSampleBuffer(
+            samples=samples,
+            sample_rate_hz=actual_rate_hz,
+            channel_count=8,
+        )
+
+    def capture_trigger(
+        self,
+        sample_rate_hz: int,
+        pre_samples: int,
+        post_samples: int,
+        trigger_channel: int,
+        edge: str,
+        timeout_ms: int = 3000,
+    ) -> LogicSampleBuffer:
+        """
+        Capture bằng hardware trigger của Pico.
+
+        trigger_channel:
+            0 = firmware CH0 = GPIO2 = app CH1
+            1 = firmware CH1 = GPIO3 = app CH2
+            ...
+            7 = firmware CH7 = GPIO9 = app CH8
+
+        edge:
+            rising
+            falling
+            either  -> được đổi thành "change" cho firmware
+        """
+
+        sample_rate_hz = int(sample_rate_hz)
+        pre_samples = int(pre_samples)
+        post_samples = int(post_samples)
+        trigger_channel = int(trigger_channel)
+        timeout_ms = int(timeout_ms)
+
+        edge = str(edge).strip().lower()
+
+        # UI hiện tại gọi là "either",
+        # firmware của bạn fen gọi là "change".
+        if edge == "either":
+            firmware_edge = "change"
+        else:
+            firmware_edge = edge
+
+        if not 1 <= sample_rate_hz <= MAX_RATE_HZ:
+            raise ValueError(f"sample_rate_hz must be between " f"1 and {MAX_RATE_HZ}")
+
+        if not 0 <= pre_samples <= MAX_PRETRIGGER_SAMPLES:
+            raise ValueError(f"pre_samples must be between " f"0 and {MAX_PRETRIGGER_SAMPLES}")
+
+        if post_samples < 1:
+            raise ValueError("post_samples must be at least 1")
+
+        total_samples = pre_samples + post_samples
+
+        if total_samples > MAX_CAPTURE_SAMPLES:
+            raise ValueError(
+                f"Total trigger capture is {total_samples} samples, "
+                f"but the Pico supports at most "
+                f"{MAX_CAPTURE_SAMPLES}"
+            )
+
+        if not 0 <= trigger_channel <= 7:
+            raise ValueError("trigger_channel must be between 0 and 7")
+
+        allowed_edges = {
+            "rising",
+            "falling",
+            "change",
+            "high",
+            "low",
+        }
+
+        if firmware_edge not in allowed_edges:
+            raise ValueError(f"Unsupported trigger edge: {edge}")
+
+        if timeout_ms < 1:
+            raise ValueError("timeout_ms must be greater than zero")
+
+        command = (
+            f"CAP_TRIGGER "
+            f"{sample_rate_hz} "
+            f"{pre_samples} "
+            f"{post_samples} "
+            f"0x{self.channel_mask:02x} "
+            f"{trigger_channel} "
+            f"{firmware_edge} "
+            f"{timeout_ms}"
+        )
+
+        acquisition_seconds = total_samples / sample_rate_hz
+
+        # Chờ trigger + thời gian thu + thời gian truyền USB.
+        serial_timeout = max(
+            5.0,
+            timeout_ms / 1000.0 + acquisition_seconds + 3.0,
+        )
+
+        with _ProductProtocol(
+            port=self.port,
+            baudrate=self.baudrate,
+            timeout=serial_timeout,
+        ) as protocol:
+            protocol.send_line(command)
+            metadata, raw = protocol.read_capture_block()
+
+        actual_rate_hz = self._actual_rate_from_metadata(
+            default_rate_hz=sample_rate_hz,
+            metadata=metadata,
+        )
+
+        samples = np.frombuffer(
+            raw,
+            dtype=np.uint8,
+        ).copy()
+
+        if samples.size != total_samples:
+            metadata_text = "\n".join(f"  {line}" for line in metadata)
+
+            raise PicoDriverError(
                 f"Pico returned {samples.size} samples, "
-                f"but {sample_count} were requested."
+                f"but {total_samples} were requested.\n\n"
+                f"Command:\n"
+                f"  {command}\n\n"
+                f"Firmware metadata:\n"
+                f"{metadata_text}"
             )
 
         return LogicSampleBuffer(
