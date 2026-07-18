@@ -290,11 +290,25 @@ class UARTDecoder:
                 )
             )
 
-            # Nhảy qua frame vừa decode để tránh hiểu cạnh bên trong
-            # các data bit là một start bit mới.
+            # Sau khi decode xong, KHÔNG nhảy thẳng tới frame_end_sample.
+            #
+            # Với các frame UART nối liền nhau, cạnh xuống START của byte kế
+            # tiếp có thể nằm đúng tại biên:
+            #
+            #     frame_start + frame_length_bits * samples_per_bit
+            #
+            # frame_end_sample dùng round(), nên đôi khi nó rơi ngay sau cạnh
+            # START đó. Nếu đặt sample_index = frame_end_sample, vòng lặp sẽ
+            # bỏ qua cạnh HIGH -> LOW và mất nguyên byte, đặc biệt dễ thấy với
+            # 0x00 hoặc 0xFF vì bên trong frame gần như không còn cạnh xuống.
+            #
+            # Ta chỉ bỏ qua tới GIỮA stop bit cuối. Từ đó vòng quét tiếp tục
+            # từng sample và vẫn nhìn thấy cạnh START của frame kế tiếp.
+            resume_position = frame_start_sample + (frame_length_bits - 0.5) * samples_per_bit
+
             sample_index = max(
                 sample_index + 1,
-                frame_end_sample,
+                int(resume_position),
             )
 
         return annotations
