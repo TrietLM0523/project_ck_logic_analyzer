@@ -24,6 +24,7 @@ from data.logic_sample_buffer import LogicSampleBuffer
 from driver.demo_driver import DemoDriver
 from driver.pico_driver import (
     MAX_CAPTURE_SAMPLES,
+    MAX_PRETRIGGER_SAMPLES,
     PicoDriver,
     PicoDriverError,
 )
@@ -38,6 +39,8 @@ from fileio.la_session import (
 from trigger.trigger_detector import find_trigger_sample
 from ui.decoder_panel import DecoderPanel
 from ui.waveform_view import WaveformView
+
+PICO_TRIGGER_TIMEOUT_MS = 20_000
 
 
 class MainWindow(QMainWindow):
@@ -54,6 +57,12 @@ class MainWindow(QMainWindow):
             "LogicAnalyzerApp",
         )
 
+        # Updated by refresh_pico_ports(). It lets the GUI distinguish the
+        # Raspberry Pi USB CDC device from unrelated COM ports such as
+        # Bluetooth serial links.
+        self.pico_devices_by_port: dict[str, object] = {}
+        self.waveform_focus_enabled = False
+
         root = QWidget()
         root_layout = QVBoxLayout(root)
 
@@ -62,15 +71,15 @@ class MainWindow(QMainWindow):
         # ==========================================================
         capture_bar = QHBoxLayout()
 
-        self.title = QLabel("Logic Analyzer App")
+        self.title = QLabel("Logic Analyzer")
 
-        self.source_label = QLabel("Source:")
+        self.source_label = QLabel("Src:")
         self.source_combo = QComboBox()
         self.source_combo.addItem("Demo", "demo")
         self.source_combo.addItem("Saleae Clone", "saleae")
         self.source_combo.addItem("Pico 2 Product MCU", "pico")
 
-        self.sample_rate_label = QLabel("Sample rate:")
+        self.sample_rate_label = QLabel("Rate:")
         self.sample_rate_combo = QComboBox()
         self.sample_rate_combo.addItem("100 kHz", 100_000)
         self.sample_rate_combo.addItem("250 kHz", 250_000)
@@ -81,7 +90,7 @@ class MainWindow(QMainWindow):
         self.sample_rate_combo.addItem("8 MHz", 8_000_000)
         self.sample_rate_combo.setCurrentIndex(3)
 
-        self.duration_label = QLabel("Duration:")
+        self.duration_label = QLabel("Time:")
         self.duration_spin = QSpinBox()
         # Pico supports at most 65,536 samples, so high sample rates
         # sometimes need durations below 10 ms.
@@ -90,14 +99,14 @@ class MainWindow(QMainWindow):
         self.duration_spin.setSingleStep(10)
         self.duration_spin.setSuffix(" ms")
 
-        self.trigger_label = QLabel("Trigger:")
+        self.trigger_label = QLabel("Trig:")
         self.trigger_combo = QComboBox()
         self.trigger_combo.addItem("Disabled", None)
         self.trigger_combo.addItem("Rising edge", "rising")
         self.trigger_combo.addItem("Falling edge", "falling")
         self.trigger_combo.addItem("Either edge", "either")
 
-        self.trigger_channel_label = QLabel("Channel:")
+        self.trigger_channel_label = QLabel("Ch:")
         self.trigger_channel_combo = QComboBox()
         for channel_index in range(8):
             self.trigger_channel_combo.addItem(
@@ -105,18 +114,35 @@ class MainWindow(QMainWindow):
                 channel_index,
             )
 
-        self.pretrigger_label = QLabel("Pre-trigger:")
+        self.pretrigger_label = QLabel("Pre:")
         self.pretrigger_spin = QSpinBox()
-        self.pretrigger_spin.setRange(0, 90)
+        self.pretrigger_spin.setRange(0, 100)
         self.pretrigger_spin.setValue(30)
         self.pretrigger_spin.setSingleStep(10)
         self.pretrigger_spin.setSuffix(" %")
+        self.pretrigger_spin.setToolTip(
+            "Percentage of the total capture stored before the trigger."
+        )
 
-        self.button_start_capture = QPushButton("Start Capture")
-        self.button_save_session = QPushButton("Save Session")
-        self.button_open_session = QPushButton("Open Session")
-        self.button_fit = QPushButton("Fit View")
-        self.button_clear_capture = QPushButton("Clear Capture")
+        self.posttrigger_label = QLabel("Post:")
+        self.posttrigger_spin = QSpinBox()
+        self.posttrigger_spin.setRange(0, 100)
+        self.posttrigger_spin.setValue(70)
+        self.posttrigger_spin.setSingleStep(10)
+        self.posttrigger_spin.setSuffix(" %")
+        self.posttrigger_spin.setToolTip(
+            "Percentage of the Time window stored after the trigger. "
+            "Pre-trigger and post-trigger are configured independently; "
+            "their sum must not exceed 100%."
+        )
+
+        self.button_start_capture = QPushButton("Capture")
+        self.button_save_session = QPushButton("Save")
+        self.button_open_session = QPushButton("Open")
+        self.button_fit = QPushButton("Fit")
+        self.button_clear_capture = QPushButton("Clear")
+        self.button_focus_waveform = QPushButton("Focus")
+        self.button_fullscreen = QPushButton("F11")
 
         capture_bar.addWidget(self.title)
         capture_bar.addStretch()
@@ -132,22 +158,26 @@ class MainWindow(QMainWindow):
         capture_bar.addWidget(self.trigger_channel_combo)
         capture_bar.addWidget(self.pretrigger_label)
         capture_bar.addWidget(self.pretrigger_spin)
+        capture_bar.addWidget(self.posttrigger_label)
+        capture_bar.addWidget(self.posttrigger_spin)
         capture_bar.addWidget(self.button_start_capture)
         capture_bar.addWidget(self.button_save_session)
         capture_bar.addWidget(self.button_open_session)
         capture_bar.addWidget(self.button_fit)
         capture_bar.addWidget(self.button_clear_capture)
+        capture_bar.addWidget(self.button_focus_waveform)
+        capture_bar.addWidget(self.button_fullscreen)
 
         root_layout.addLayout(capture_bar)
 
         # Pico-specific controls are kept on a separate row so the main
         # capture bar does not become too crowded.
         pico_bar = QHBoxLayout()
-        self.pico_port_label = QLabel("Pico serial port:")
+        self.pico_port_label = QLabel("Port:")
         self.pico_port_combo = QComboBox()
         self.pico_port_combo.setMinimumWidth(280)
-        self.button_refresh_pico_ports = QPushButton("Refresh ports")
-        self.pico_mapping_label = QLabel("GP2..GP9 → CH1..CH8 | input level: 3.3 V")
+        self.button_refresh_pico_ports = QPushButton("Refresh")
+        self.pico_mapping_label = QLabel("GP2–GP9 = CH1–CH8 | 3.3 V")
 
         pico_bar.addStretch()
         pico_bar.addWidget(self.pico_port_label)
@@ -158,31 +188,54 @@ class MainWindow(QMainWindow):
         root_layout.addLayout(pico_bar)
 
         # ==========================================================
-        # Main content
+        # Main content: waveform dominates the window.
+        # Decoder and status information are placed in a side panel.
         # ==========================================================
-        main_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.workspace_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.waveform_view = WaveformView()
 
-        bottom_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.side_panel = QWidget()
+        self.side_panel.setMinimumWidth(470)
+        side_layout = QVBoxLayout(self.side_panel)
+        side_layout.setContentsMargins(
+            0,
+            0,
+            0,
+            0,
+        )
 
         self.output = QTextEdit()
         self.output.setReadOnly(True)
+        self.output.setMaximumHeight(230)
 
         self.decoder_panel = DecoderPanel()
 
-        bottom_splitter.addWidget(self.output)
-        bottom_splitter.addWidget(self.decoder_panel)
-        bottom_splitter.setSizes([430, 820])
-        bottom_splitter.setChildrenCollapsible(False)
+        side_layout.addWidget(
+            self.decoder_panel,
+            1,
+        )
+        side_layout.addWidget(
+            self.output,
+            0,
+        )
 
-        main_splitter.addWidget(self.waveform_view)
-        main_splitter.addWidget(bottom_splitter)
-        main_splitter.setSizes([570, 230])
-        main_splitter.setChildrenCollapsible(False)
-        main_splitter.setStretchFactor(0, 3)
-        main_splitter.setStretchFactor(1, 2)
+        self.workspace_splitter.addWidget(self.waveform_view)
+        self.workspace_splitter.addWidget(self.side_panel)
+        self.workspace_splitter.setSizes([1000, 520])
+        self.workspace_splitter.setStretchFactor(
+            0,
+            5,
+        )
+        self.workspace_splitter.setStretchFactor(
+            1,
+            2,
+        )
+        self.workspace_splitter.setChildrenCollapsible(False)
 
-        root_layout.addWidget(main_splitter)
+        root_layout.addWidget(
+            self.workspace_splitter,
+            1,
+        )
         self.setCentralWidget(root)
 
         # ==========================================================
@@ -193,6 +246,8 @@ class MainWindow(QMainWindow):
         self.button_open_session.clicked.connect(self.open_session)
         self.button_fit.clicked.connect(self.fit_view)
         self.button_clear_capture.clicked.connect(self.clear_capture)
+        self.button_focus_waveform.clicked.connect(self.toggle_focus_waveform)
+        self.button_fullscreen.clicked.connect(self.toggle_fullscreen)
         self.button_refresh_pico_ports.clicked.connect(self.refresh_pico_ports)
 
         self.trigger_combo.currentIndexChanged.connect(self.update_trigger_controls)
@@ -219,30 +274,84 @@ class MainWindow(QMainWindow):
         previous_port = self.pico_port_combo.currentData()
         devices = PicoDriver.scan()
 
+        self.pico_devices_by_port = {device.port: device for device in devices}
+
         self.pico_port_combo.clear()
+        likely_pico_port: str | None = None
 
         for device in devices:
             description = device.description or "Serial device"
-            label = f"{device.port} — {description}"
-            self.pico_port_combo.addItem(label, device.port)
 
-        if previous_port:
+            is_likely_pico = self._is_likely_pico_port(device.port)
+
+            marker = " [Pico]" if is_likely_pico else ""
+            label = f"{device.port} — " f"{description}{marker}"
+
+            self.pico_port_combo.addItem(
+                label,
+                device.port,
+            )
+
+            if is_likely_pico and likely_pico_port is None:
+                likely_pico_port = device.port
+
+        # Keep the previous selection only when it still looks like the Pico.
+        # Otherwise prefer the Raspberry Pi USB VID device automatically.
+        if previous_port and self._is_likely_pico_port(str(previous_port)):
             self._select_combo_data(
                 self.pico_port_combo,
                 previous_port,
             )
+        elif likely_pico_port:
+            self._select_combo_data(
+                self.pico_port_combo,
+                likely_pico_port,
+            )
 
         if show_message:
-            if devices:
+            selected_port = self.selected_pico_port()
+
+            if likely_pico_port:
                 self.statusBar().showMessage(
-                    f"Found {len(devices)} serial port(s)",
-                    3000,
+                    ("Pico detected and selected: " f"{selected_port}"),
+                    4000,
+                )
+            elif devices:
+                self.statusBar().showMessage(
+                    (
+                        f"Found {len(devices)} serial "
+                        "port(s), but no Raspberry Pi "
+                        "USB Pico port was identified."
+                    ),
+                    5000,
                 )
             else:
                 self.statusBar().showMessage(
                     "No serial ports found",
                     3000,
                 )
+
+    def _is_likely_pico_port(
+        self,
+        port_name: str,
+    ) -> bool:
+        device = self.pico_devices_by_port.get(str(port_name))
+
+        if device is None:
+            return False
+
+        description = (getattr(device, "description", "") or "").lower()
+        manufacturer = (getattr(device, "manufacturer", "") or "").lower()
+        vid = getattr(device, "vid", None)
+
+        # Raspberry Pi USB vendor ID. The user's firmware currently appears
+        # as "USB Serial Device" with VID 0x2E8A.
+        return (
+            vid == 0x2E8A
+            or "raspberry pi" in manufacturer
+            or "raspberry pi" in description
+            or "pico" in description
+        )
 
     def selected_pico_port(self) -> str:
         port = self.pico_port_combo.currentData()
@@ -267,8 +376,11 @@ class MainWindow(QMainWindow):
 
             sample_rate_hz = int(self.sample_rate_combo.currentData())
             maximum_duration_ms = MAX_CAPTURE_SAMPLES * 1000 / sample_rate_hz
+            trigger_enabled = self.trigger_combo.currentData() is not None
+            mode_name = "CAP_TRIGGER" if trigger_enabled else "CAP_TIMER"
+
             self.statusBar().showMessage(
-                "Pico CAP_TIMER: "
+                f"Pico {mode_name}: "
                 f"maximum {MAX_CAPTURE_SAMPLES:,} samples; "
                 f"at {sample_rate_hz:,} Hz use duration <= "
                 f"{maximum_duration_ms:.3f} ms"
@@ -317,14 +429,21 @@ class MainWindow(QMainWindow):
                 )
             ),
         )
-        self.pretrigger_spin.setValue(
-            int(
-                self.settings.value(
-                    "pretrigger_percent",
-                    30,
-                )
+        saved_pretrigger_percent = int(
+            self.settings.value(
+                "pretrigger_percent",
+                30,
             )
         )
+        saved_posttrigger_percent = int(
+            self.settings.value(
+                "posttrigger_percent",
+                70,
+            )
+        )
+
+        self.pretrigger_spin.setValue(saved_pretrigger_percent)
+        self.posttrigger_spin.setValue(saved_posttrigger_percent)
 
         saved_pico_port = str(
             self.settings.value(
@@ -332,7 +451,10 @@ class MainWindow(QMainWindow):
                 "",
             )
         )
-        if saved_pico_port:
+
+        # Restore only a port that still identifies as the Pico. This avoids
+        # QSettings bringing back a stale Bluetooth COM port.
+        if saved_pico_port and self._is_likely_pico_port(saved_pico_port):
             self._select_combo_data(
                 self.pico_port_combo,
                 saved_pico_port,
@@ -370,9 +492,18 @@ class MainWindow(QMainWindow):
             self.pretrigger_spin.value(),
         )
         self.settings.setValue(
-            "pico_port",
-            self.selected_pico_port(),
+            "posttrigger_percent",
+            self.posttrigger_spin.value(),
         )
+        selected_port = self.selected_pico_port()
+
+        if self._is_likely_pico_port(selected_port):
+            self.settings.setValue(
+                "pico_port",
+                selected_port,
+            )
+        else:
+            self.settings.remove("pico_port")
 
     @staticmethod
     def _select_combo_data(
@@ -395,6 +526,42 @@ class MainWindow(QMainWindow):
         enabled = self.trigger_combo.currentData() is not None
         self.trigger_channel_combo.setEnabled(enabled)
         self.pretrigger_spin.setEnabled(enabled)
+        self.posttrigger_spin.setEnabled(enabled)
+        self.update_source_controls()
+
+    def toggle_focus_waveform(self):
+        """Hide/show the decoder and information side panel."""
+
+        self.waveform_focus_enabled = not self.waveform_focus_enabled
+
+        self.side_panel.setVisible(not self.waveform_focus_enabled)
+
+        self.button_focus_waveform.setText("Tools" if self.waveform_focus_enabled else "Focus")
+
+        if self.current_buffer is not None:
+            self.fit_view()
+
+    def toggle_fullscreen(self):
+        if self.isFullScreen():
+            self.showNormal()
+            self.button_fullscreen.setText("F11")
+        else:
+            self.showFullScreen()
+            self.button_fullscreen.setText("Exit")
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_F11:
+            self.toggle_fullscreen()
+            event.accept()
+            return
+
+        if event.key() == Qt.Key.Key_Escape and self.isFullScreen():
+            self.showNormal()
+            self.button_fullscreen.setText("F11")
+            event.accept()
+            return
+
+        super().keyPressEvent(event)
 
     def show_welcome_message(self):
         lines = [
@@ -413,8 +580,9 @@ class MainWindow(QMainWindow):
             "Features:",
             "- SPI, I2C and UART decoding",
             "- Decode overlay on the waveform",
-            "- Timing cursors and software trigger",
-            "- CSV export and .la session save/load",
+            "- Pico hardware trigger with independent pre/post-trigger controls",
+            "- Software trigger for Demo, Saleae and loaded sessions",
+            "- Timing cursors, CSV export and .la session save/load",
             "",
             "Cursor controls:",
             "- Shift + left click: Cursor A",
@@ -430,27 +598,112 @@ class MainWindow(QMainWindow):
         source = self.source_combo.currentData()
         sample_rate_hz = int(self.sample_rate_combo.currentData())
         duration_ms = self.duration_spin.value()
+        trigger_edge = self.trigger_combo.currentData()
 
         estimated_sample_count = round(sample_rate_hz * duration_ms / 1000)
 
-        if source == "pico" and estimated_sample_count > MAX_CAPTURE_SAMPLES:
-            maximum_duration_ms = MAX_CAPTURE_SAMPLES * 1000 / sample_rate_hz
-            QMessageBox.warning(
-                self,
-                "Pico capture too large",
-                (
-                    f"The requested capture contains "
-                    f"{estimated_sample_count:,} samples.\n\n"
-                    f"The Pico firmware supports at most "
-                    f"{MAX_CAPTURE_SAMPLES:,} samples per "
-                    f"CAP_TIMER capture.\n\n"
-                    f"At {sample_rate_hz:,} Hz, set duration "
-                    f"to {maximum_duration_ms:.3f} ms or less."
-                ),
-            )
-            return
+        hardware_trigger_enabled = source == "pico" and trigger_edge is not None
 
-        if source != "pico" and estimated_sample_count > 5_000_000:
+        pre_samples: int | None = None
+        post_samples: int | None = None
+
+        if source == "pico":
+            if hardware_trigger_enabled:
+                pre_percent = int(self.pretrigger_spin.value())
+                post_percent = int(self.posttrigger_spin.value())
+                trigger_percent_total = pre_percent + post_percent
+
+                if trigger_percent_total > 100:
+                    QMessageBox.warning(
+                        self,
+                        "Invalid trigger percentages",
+                        (
+                            "Pre-trigger and post-trigger are "
+                            "configured independently, but their "
+                            "sum must not exceed 100%.\n\n"
+                            f"Current values: {pre_percent}% pre + "
+                            f"{post_percent}% post = "
+                            f"{trigger_percent_total}%."
+                        ),
+                    )
+                    return
+
+                if trigger_percent_total <= 0:
+                    QMessageBox.warning(
+                        self,
+                        "Empty trigger capture",
+                        ("At least one of Pre or Post must be " "greater than 0%."),
+                    )
+                    return
+
+                pre_samples = round(estimated_sample_count * pre_percent / 100.0)
+                post_samples = round(estimated_sample_count * post_percent / 100.0)
+                trigger_sample_count = pre_samples + post_samples
+
+                if trigger_sample_count > MAX_CAPTURE_SAMPLES:
+                    QMessageBox.warning(
+                        self,
+                        "Pico trigger capture too large",
+                        (
+                            f"The selected Pre/Post values produce "
+                            f"{trigger_sample_count:,} samples.\n\n"
+                            f"The Pico firmware supports at most "
+                            f"{MAX_CAPTURE_SAMPLES:,} samples per "
+                            "CAP_TRIGGER capture.\n\n"
+                            "Reduce Time, Pre, or Post."
+                        ),
+                    )
+                    return
+
+                if pre_samples > MAX_PRETRIGGER_SAMPLES:
+                    maximum_pre_percent = MAX_PRETRIGGER_SAMPLES * 100 / estimated_sample_count
+
+                    QMessageBox.warning(
+                        self,
+                        "Pico pre-trigger too large",
+                        (
+                            f"The requested pre-trigger contains "
+                            f"{pre_samples:,} samples.\n\n"
+                            f"The Pico firmware supports at most "
+                            f"{MAX_PRETRIGGER_SAMPLES:,} "
+                            f"pre-trigger samples.\n\n"
+                            f"For this Time value, use "
+                            f"Pre <= {maximum_pre_percent:.1f}%."
+                        ),
+                    )
+                    return
+
+                if post_samples < 1:
+                    QMessageBox.warning(
+                        self,
+                        "Invalid post-trigger length",
+                        (
+                            "Hardware trigger capture requires at "
+                            "least one post-trigger sample. Increase "
+                            "Post or Time."
+                        ),
+                    )
+                    return
+
+            elif estimated_sample_count > MAX_CAPTURE_SAMPLES:
+                maximum_duration_ms = MAX_CAPTURE_SAMPLES * 1000 / sample_rate_hz
+
+                QMessageBox.warning(
+                    self,
+                    "Pico capture too large",
+                    (
+                        f"The requested capture contains "
+                        f"{estimated_sample_count:,} samples.\n\n"
+                        f"The Pico firmware supports at most "
+                        f"{MAX_CAPTURE_SAMPLES:,} samples per "
+                        "CAP_TIMER capture.\n\n"
+                        f"At {sample_rate_hz:,} Hz, set duration "
+                        f"to {maximum_duration_ms:.3f} ms or less."
+                    ),
+                )
+                return
+
+        elif estimated_sample_count > 5_000_000:
             response = QMessageBox.question(
                 self,
                 "Large capture",
@@ -469,8 +722,15 @@ class MainWindow(QMainWindow):
 
         self.button_start_capture.setEnabled(False)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        self.statusBar().showMessage("Capturing...")
+
+        if hardware_trigger_enabled:
+            self.statusBar().showMessage("Hardware trigger armed; waiting for event...")
+        else:
+            self.statusBar().showMessage("Capturing...")
+
         QApplication.processEvents()
+
+        hardware_trigger_info: dict | None = None
 
         try:
             if source == "demo":
@@ -493,11 +753,57 @@ class MainWindow(QMainWindow):
                 if not pico_port:
                     raise ValueError("Select the Pico serial port first.")
 
-                buffer = self.capture_pico(
-                    port=pico_port,
-                    sample_rate_hz=sample_rate_hz,
-                    duration_ms=duration_ms,
-                )
+                if not self._is_likely_pico_port(pico_port):
+                    raise ValueError(
+                        f"{pico_port} does not look like "
+                        "the Pico logic analyzer. "
+                        "Click Refresh ports and select "
+                        "the USB Serial Device marked [Pico], "
+                        "not a Bluetooth COM port."
+                    )
+
+                if not hardware_trigger_enabled:
+                    buffer = self.capture_pico(
+                        port=pico_port,
+                        sample_rate_hz=sample_rate_hz,
+                        duration_ms=duration_ms,
+                    )
+                else:
+                    trigger_channel = int(self.trigger_channel_combo.currentData())
+
+                    (
+                        buffer,
+                        actual_trigger_sample,
+                    ) = self.capture_pico_trigger(
+                        port=pico_port,
+                        sample_rate_hz=sample_rate_hz,
+                        pre_samples=int(pre_samples),
+                        post_samples=int(post_samples),
+                        trigger_channel=trigger_channel,
+                        edge=str(trigger_edge),
+                        timeout_ms=PICO_TRIGGER_TIMEOUT_MS,
+                    )
+
+                    hardware_trigger_info = {
+                        "edge": str(trigger_edge),
+                        "channel_index": trigger_channel,
+                        # Vị trí trigger thực tế do firmware trả.
+                        "trigger_sample": int(actual_trigger_sample),
+                        # Cấu hình người dùng yêu cầu.
+                        "requested_pre_samples": int(pre_samples),
+                        "requested_post_samples": int(post_samples),
+                        "requested_pre_percent": int(self.pretrigger_spin.value()),
+                        "requested_post_percent": int(self.posttrigger_spin.value()),
+                        "requested_total_percent": int(
+                            self.pretrigger_spin.value() + self.posttrigger_spin.value()
+                        ),
+                        "reference_window_samples": int(estimated_sample_count),
+                        # Số mẫu thực tế trong buffer.
+                        "actual_pre_samples": int(actual_trigger_sample),
+                        "actual_post_samples": int(buffer.sample_count() - actual_trigger_sample),
+                        "timeout_ms": PICO_TRIGGER_TIMEOUT_MS,
+                    }
+
                 source_name = f"Pico 2 ({pico_port})"
 
             else:
@@ -509,6 +815,17 @@ class MainWindow(QMainWindow):
             SigrokCliError,
             PicoDriverError,
         ) as error:
+            self.current_buffer = None
+            self.current_source_name = "None"
+
+            self.waveform_view.set_buffer(None)
+            self.waveform_view.clear_trigger()
+            self.decoder_panel.set_buffer(None)
+
+            self.output.setPlainText(
+                "Capture failed.\n" "No new capture was loaded.\n\n" f"{error}"
+            )
+
             QMessageBox.critical(
                 self,
                 "Capture failed",
@@ -524,6 +841,7 @@ class MainWindow(QMainWindow):
         self.load_capture_buffer(
             buffer=buffer,
             source_name=source_name,
+            hardware_trigger_info=hardware_trigger_info,
         )
 
         self.statusBar().showMessage(
@@ -570,6 +888,38 @@ class MainWindow(QMainWindow):
             duration_ms=duration_ms,
         )
 
+    def capture_pico_trigger(
+        self,
+        port: str,
+        sample_rate_hz: int,
+        pre_samples: int,
+        post_samples: int,
+        trigger_channel: int,
+        edge: str,
+        timeout_ms: int,
+    ) -> tuple[LogicSampleBuffer, int]:
+        driver = PicoDriver(
+            port=port,
+            channel_mask=0xFF,
+        )
+
+        buffer = driver.capture_trigger(
+            sample_rate_hz=sample_rate_hz,
+            pre_samples=pre_samples,
+            post_samples=post_samples,
+            trigger_channel=trigger_channel,
+            edge=edge,
+            timeout_ms=timeout_ms,
+        )
+
+        trigger_index = driver.last_trigger_index
+
+        # Dự phòng cho firmware cũ không có trig_index.
+        if trigger_index is None:
+            trigger_index = pre_samples
+
+        return buffer, int(trigger_index)
+
     # ==============================================================
     # Buffer loading and trigger
     # ==============================================================
@@ -577,6 +927,7 @@ class MainWindow(QMainWindow):
         self,
         buffer: LogicSampleBuffer,
         source_name: str,
+        hardware_trigger_info: dict | None = None,
     ):
         self.current_buffer = buffer
         self.current_source_name = source_name
@@ -584,10 +935,43 @@ class MainWindow(QMainWindow):
         self.waveform_view.set_buffer(buffer)
         self.decoder_panel.set_buffer(buffer)
 
-        trigger_info = self.apply_software_trigger(buffer)
+        if hardware_trigger_info is not None:
+            trigger_sample = int(hardware_trigger_info["trigger_sample"])
 
-        if not trigger_info["found"]:
-            self.fit_view()
+            self.waveform_view.set_trigger_sample(trigger_sample)
+
+            actual_position_ratio = trigger_sample / max(
+                1,
+                buffer.sample_count(),
+            )
+
+            self.waveform_view.center_on_sample(
+                sample_index=trigger_sample,
+                position_ratio=actual_position_ratio,
+            )
+
+            trigger_info = {
+                "mode": "hardware",
+                "enabled": True,
+                "found": True,
+                "edge": hardware_trigger_info["edge"],
+                "channel_index": (hardware_trigger_info["channel_index"]),
+                "sample": trigger_sample,
+                "requested_pre_samples": (hardware_trigger_info["requested_pre_samples"]),
+                "requested_post_samples": (hardware_trigger_info["requested_post_samples"]),
+                "requested_pre_percent": (hardware_trigger_info["requested_pre_percent"]),
+                "requested_post_percent": (hardware_trigger_info["requested_post_percent"]),
+                "requested_total_percent": (hardware_trigger_info["requested_total_percent"]),
+                "reference_window_samples": (hardware_trigger_info["reference_window_samples"]),
+                "actual_pre_samples": (hardware_trigger_info["actual_pre_samples"]),
+                "actual_post_samples": (hardware_trigger_info["actual_post_samples"]),
+                "timeout_ms": (hardware_trigger_info["timeout_ms"]),
+            }
+        else:
+            trigger_info = self.apply_software_trigger(buffer)
+
+            if not trigger_info["found"]:
+                self.fit_view()
 
         lines = [
             "Capture completed successfully.",
@@ -644,6 +1028,7 @@ class MainWindow(QMainWindow):
         if edge is None:
             self.waveform_view.clear_trigger()
             return {
+                "mode": "software",
                 "enabled": False,
                 "found": False,
                 "edge": None,
@@ -662,6 +1047,7 @@ class MainWindow(QMainWindow):
         if trigger_sample is None:
             self.waveform_view.clear_trigger()
             return {
+                "mode": "software",
                 "enabled": True,
                 "found": False,
                 "edge": edge,
@@ -670,12 +1056,19 @@ class MainWindow(QMainWindow):
             }
 
         self.waveform_view.set_trigger_sample(trigger_sample)
+
+        actual_position_ratio = trigger_sample / max(
+            1,
+            buffer.sample_count(),
+        )
+
         self.waveform_view.center_on_sample(
             sample_index=trigger_sample,
-            position_ratio=(self.pretrigger_spin.value() / 100.0),
+            position_ratio=actual_position_ratio,
         )
 
         return {
+            "mode": "software",
             "enabled": True,
             "found": True,
             "edge": edge,
@@ -689,24 +1082,54 @@ class MainWindow(QMainWindow):
         trigger_info: dict,
     ):
         if not trigger_info["enabled"]:
-            lines.append("Software trigger: Disabled")
+            lines.append("Trigger: Disabled")
             return
 
         channel_name = f"CH{trigger_info['channel_index'] + 1}"
         edge_name = str(trigger_info["edge"]).capitalize()
 
+        if trigger_info.get("mode") == "hardware":
+            trigger_sample = int(trigger_info["sample"])
+            trigger_time_us = trigger_sample / self.current_buffer.sample_rate_hz * 1_000_000
+
+            lines.append(f"Hardware trigger: " f"{edge_name} on {channel_name}")
+            lines.append(f"Trigger sample: {trigger_sample}")
+            lines.append(f"Trigger time in buffer: " f"{trigger_time_us:.3f} us")
+            lines.append(
+                "Requested trigger regions: "
+                f"{trigger_info['requested_pre_percent']}% pre / "
+                f"{trigger_info['requested_post_percent']}% post "
+                f"({trigger_info['requested_total_percent']}% of "
+                "the Time window)"
+            )
+            lines.append(
+                "Reference Time-window samples: " f"{trigger_info['reference_window_samples']}"
+            )
+            lines.append(
+                "Requested pre-trigger samples: " f"{trigger_info['requested_pre_samples']}"
+            )
+            lines.append(
+                "Requested post-trigger samples: " f"{trigger_info['requested_post_samples']}"
+            )
+
+            lines.append("Actual pre-trigger samples: " f"{trigger_info['actual_pre_samples']}")
+
+            lines.append("Actual post-trigger samples: " f"{trigger_info['actual_post_samples']}")
+            lines.append(f"Arm timeout: " f"{trigger_info['timeout_ms']} ms")
+            return
+
         if not trigger_info["found"]:
-            lines.append((f"Software trigger: {edge_name} " f"on {channel_name}"))
+            lines.append(f"Software trigger: " f"{edge_name} on {channel_name}")
             lines.append("Trigger result: No matching edge found")
             return
 
         trigger_sample = int(trigger_info["sample"])
         trigger_time_us = trigger_sample / self.current_buffer.sample_rate_hz * 1_000_000
 
-        lines.append((f"Software trigger: {edge_name} " f"on {channel_name}"))
+        lines.append(f"Software trigger: " f"{edge_name} on {channel_name}")
         lines.append(f"Trigger sample: {trigger_sample}")
         lines.append(f"Trigger time: {trigger_time_us:.3f} us")
-        lines.append(("View pre-trigger position: " f"{self.pretrigger_spin.value()}%"))
+        lines.append("View pre-trigger position: " f"{self.pretrigger_spin.value()}%")
 
     # ==============================================================
     # Session and display actions

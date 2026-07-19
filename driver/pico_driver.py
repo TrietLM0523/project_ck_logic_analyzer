@@ -18,6 +18,7 @@ MAX_PRETRIGGER_SAMPLES = 16_384
 DEFAULT_BAUDRATE = 115_200
 
 _RATE_RE = re.compile(r"\brate=(\d+)\b")
+_TRIGGER_INDEX_RE = re.compile(r"\btrig_index=(\d+)\b")
 
 
 class PicoDriverError(RuntimeError):
@@ -170,6 +171,8 @@ class PicoDriver:
         self.port = port
         self.baudrate = int(baudrate)
         self.channel_mask = int(channel_mask)
+        self.last_capture_metadata: list[str] = []
+        self.last_trigger_index: int | None = None
 
     @staticmethod
     def scan() -> list[PicoDeviceInfo]:
@@ -251,6 +254,8 @@ class PicoDriver:
         ) as protocol:
             protocol.send_line(command)
             metadata, raw = protocol.read_capture_block()
+            self.last_capture_metadata = list(metadata)
+            self.last_trigger_index = None
 
         actual_rate_hz = self._actual_rate_from_metadata(
             default_rate_hz=sample_rate_hz,
@@ -371,6 +376,15 @@ class PicoDriver:
             protocol.send_line(command)
             metadata, raw = protocol.read_capture_block()
 
+        # Lưu lại toàn bộ metadata của lần capture gần nhất.
+        self.last_capture_metadata = list(metadata)
+
+        # Đọc vị trí trigger thực tế do firmware báo.
+        self.last_trigger_index = self._trigger_index_from_metadata(
+            metadata=metadata,
+            default_index=pre_samples,
+        )
+
         actual_rate_hz = self._actual_rate_from_metadata(
             default_rate_hz=sample_rate_hz,
             metadata=metadata,
@@ -392,12 +406,45 @@ class PicoDriver:
                 f"Firmware metadata:\n"
                 f"{metadata_text}"
             )
+        if self.last_trigger_index is None or not 0 <= self.last_trigger_index < samples.size:
+            metadata_text = "\n".join(f"  {line}" for line in metadata)
+
+            raise PicoDriverError(
+                "Firmware returned an invalid "
+                "trigger index: "
+                f"{self.last_trigger_index}\n\n"
+                f"Firmware metadata:\n"
+                f"{metadata_text}"
+            )
 
         return LogicSampleBuffer(
             samples=samples,
             sample_rate_hz=actual_rate_hz,
             channel_count=8,
         )
+
+    @staticmethod
+    def _trigger_index_from_metadata(
+        metadata: list[str],
+        default_index: int,
+    ) -> int:
+        """
+        Đọc vị trí trigger thực tế từ metadata firmware.
+
+        Ví dụ metadata:
+            OK ... trig_index=7127 ...
+
+        Nếu firmware cũ không có trig_index thì dùng
+        pre_samples làm giá trị dự phòng.
+        """
+
+        for line in metadata:
+            match = _TRIGGER_INDEX_RE.search(line)
+
+            if match:
+                return int(match.group(1))
+
+        return int(default_index)
 
     @staticmethod
     def _actual_rate_from_metadata(
